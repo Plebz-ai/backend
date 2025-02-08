@@ -1,0 +1,8 @@
+Commit: feat(service): add speech-to-text conversion
+Date: 2025-02-08
+Description: Backend development task for the AI Character Platform.
+
+Changes made:
+- Updated Go code for backend services
+- Improved API handling
+- Enhanced performance
