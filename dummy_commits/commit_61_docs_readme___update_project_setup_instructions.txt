@@ -1,0 +1,8 @@
+Commit: docs(readme): update project setup instructions
+Date: 2025-03-10
+Description: Backend development task for the AI Character Platform.
+
+Changes made:
+- Updated Go code for backend services
+- Improved API handling
+- Enhanced performance
