@@ -1,0 +1,8 @@
+Commit: docs(api): create API usage examples
+Date: 2025-04-14
+Description: Backend development task for the AI Character Platform.
+
+Changes made:
+- Updated Go code for backend services
+- Improved API handling
+- Enhanced performance
