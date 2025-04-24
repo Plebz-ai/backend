@@ -3,6 +3,7 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 
@@ -19,6 +20,7 @@ type MessageController struct {
 	characterService *service.CharacterService
 	aiService        *service.AIServiceAdapter
 	jwtService       *jwt.Service
+	mlApiKey         string
 }
 
 // NewMessageController creates a new message controller
@@ -28,11 +30,18 @@ func NewMessageController(
 	aiService *service.AIServiceAdapter,
 	jwtService *jwt.Service,
 ) *MessageController {
+	// Get ML API key from environment or use a default for development
+	mlApiKey := os.Getenv("ML_API_KEY")
+	if mlApiKey == "" {
+		mlApiKey = "ml-api-secret-key" // Default for development only
+	}
+
 	return &MessageController{
 		messageService:   messageService,
 		characterService: characterService,
 		aiService:        aiService,
 		jwtService:       jwtService,
+		mlApiKey:         mlApiKey,
 	}
 }
 
@@ -65,8 +74,8 @@ func (c *MessageController) mlAuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		// TODO: Replace with actual API key validation logic
-		if token != "ml-api-secret-key" {
+		// Validate API key
+		if token != c.mlApiKey {
 			ctx.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid API key"})
 			ctx.Abort()
 			return

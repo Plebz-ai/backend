@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
+	"runtime"
 	"time"
 
 	"ai-agent-character-demo/backend/internal/api"
@@ -33,6 +35,12 @@ func main() {
 	if err := db.AutoMigrate(&models.Character{}, &models.Message{}, &models.User{}, &models.AudioChunk{}); err != nil {
 		log.Fatalf("Failed to migrate database: %v", err)
 	}
+
+	// Create indexes for better query performance
+	// These are safe operations that will help with scaling
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_messages_char_session ON messages(character_id, session_id)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_audio_session ON audio_chunks(session_id)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_audio_status ON audio_chunks(processing_status)")
 
 	// Initialize Gin router
 	r := gin.Default()
@@ -134,8 +142,35 @@ func main() {
 
 	// Health check endpoint
 	r.GET("/health", func(c *gin.Context) {
+		// Check database connection
+		dbStatus := "ok"
+		if err := db.Exec("SELECT 1").Error; err != nil {
+			dbStatus = fmt.Sprintf("error: %v", err)
+		}
+
+		// Get count of active connections
+		activeConnections := len(hub.GetActiveConnections())
+
+		// Get memory stats
+		var memStats runtime.MemStats
+		runtime.ReadMemStats(&memStats)
+
 		c.JSON(200, gin.H{
-			"status": "ok",
+			"status":    "ok",
+			"version":   os.Getenv("APP_VERSION"),
+			"timestamp": time.Now().Format(time.RFC3339),
+			"components": gin.H{
+				"database": dbStatus,
+				"websocket": gin.H{
+					"status":             "ok",
+					"active_connections": activeConnections,
+				},
+			},
+			"memory": gin.H{
+				"alloc_mb":  memStats.Alloc / 1024 / 1024,
+				"sys_mb":    memStats.Sys / 1024 / 1024,
+				"gc_cycles": memStats.NumGC,
+			},
 		})
 	})
 

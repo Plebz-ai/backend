@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 
@@ -18,13 +19,21 @@ import (
 type AudioController struct {
 	audioService *service.AudioService
 	jwtService   *jwt.Service
+	mlApiKey     string
 }
 
 // NewAudioController creates a new audio controller
 func NewAudioController(audioService *service.AudioService, jwtService *jwt.Service) *AudioController {
+	// Get ML API key from environment or use a default for development
+	mlApiKey := os.Getenv("ML_API_KEY")
+	if mlApiKey == "" {
+		mlApiKey = "ml-api-key-12345" // Default for development only
+	}
+
 	return &AudioController{
 		audioService: audioService,
 		jwtService:   jwtService,
+		mlApiKey:     mlApiKey,
 	}
 }
 
@@ -89,9 +98,8 @@ func (c *AudioController) mlAuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		// TODO: Replace with actual API key validation
-		// For now, using a simple hardcoded key for demo
-		if apiKey != "ml-api-key-12345" {
+		// Validate API key against environment variable
+		if apiKey != c.mlApiKey {
 			ctx.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid API key"})
 			return
 		}

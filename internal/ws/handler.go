@@ -122,6 +122,24 @@ func NewHub(characterService CharacterService, aiService AIService, messageServi
 	}
 }
 
+// SetAudioService sets the audio service after hub initialization
+func (h *Hub) SetAudioService(audioService interface{}) {
+	h.audioService = audioService
+}
+
+// GetActiveConnections returns the number of active WebSocket connections
+func (h *Hub) GetActiveConnections() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	clientIDs := make([]string, 0, len(h.clients))
+	for client := range h.clients {
+		clientIDs = append(clientIDs, client.ID)
+	}
+
+	return clientIDs
+}
+
 func (h *Hub) Run() {
 	for {
 		select {
@@ -182,14 +200,25 @@ func (c *Client) ReadPump() {
 		var message Message
 		if err := json.Unmarshal(messageData, &message); err != nil {
 			log.Printf("Error unmarshaling message: %v", err)
+			c.sendErrorMessage("Invalid message format")
 			continue
 		}
 
+		// Handle message in a separate goroutine to avoid blocking the read pump
+		// This allows the client to continue reading messages while processing
 		go c.handleMessage(message)
 	}
 }
 
 func (c *Client) handleMessage(message Message) {
+	// Add recovery to prevent crashes from panics in message handlers
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Recovered from panic in handleMessage: %v", r)
+			c.sendErrorMessage("Internal server error occurred")
+		}
+	}()
+
 	switch message.Type {
 	case "chat":
 		c.handleChatMessage(message)
@@ -200,6 +229,7 @@ func (c *Client) handleMessage(message Message) {
 		c.sendMessage("pong", nil)
 	default:
 		log.Printf("Unknown message type: %s", message.Type)
+		c.sendErrorMessage(fmt.Sprintf("Unknown message type: %s", message.Type))
 	}
 }
 
@@ -215,18 +245,32 @@ func (c *Client) handleChatMessage(message Message) {
 	contentBytes, err := json.Marshal(message.Content)
 	if err != nil {
 		log.Printf("Error marshaling content: %v", err)
+		c.sendErrorMessage("Error processing message content")
 		return
 	}
 
 	if err := json.Unmarshal(contentBytes, &chatContent); err != nil {
 		log.Printf("Error unmarshaling chat content: %v", err)
+		c.sendErrorMessage("Invalid chat message format")
 		return
 	}
 
 	// Ensure this is a user message
 	if chatContent.Sender != "user" {
 		log.Printf("Received non-user message with sender: %s", chatContent.Sender)
+		c.sendErrorMessage("Only user messages can be sent")
 		return
+	}
+
+	// Validate content
+	if chatContent.Content == "" {
+		c.sendErrorMessage("Message content cannot be empty")
+		return
+	}
+
+	// Generate message ID if not provided
+	if chatContent.ID == "" {
+		chatContent.ID = fmt.Sprintf("msg-%d", time.Now().UnixNano())
 	}
 
 	// Store the user message in conversation history
@@ -236,6 +280,12 @@ func (c *Client) handleChatMessage(message Message) {
 		Content:   chatContent.Content,
 		Timestamp: time.Now(),
 	}
+
+	// Acknowledge receipt of message
+	c.sendMessage("ack", map[string]string{
+		"messageId": userMessage.ID,
+		"status":    "received",
+	})
 
 	c.messagesMu.Lock()
 	c.messages = append(c.messages, userMessage)
@@ -247,6 +297,7 @@ func (c *Client) handleChatMessage(message Message) {
 		err := c.Hub.messageService.SaveMessage(c.CharID, c.SessionID, &userMessage)
 		if err != nil {
 			log.Printf("Error saving message to database: %v", err)
+			// Continue processing even if save fails
 		}
 	}
 
@@ -263,12 +314,36 @@ func (c *Client) handleChatMessage(message Message) {
 		return
 	}
 
-	// Generate AI response
-	aiResponse, err := c.Hub.aiService.GenerateResponse(character, chatContent.Content, messages)
-	if err != nil {
-		log.Printf("Error generating AI response: %v", err)
-		c.sendErrorMessage("Failed to generate response from the AI character")
+	// Generate AI response with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Use a channel to handle the AI response with timeout
+	type responseResult struct {
+		response string
+		err      error
+	}
+	resultChan := make(chan responseResult, 1)
+
+	go func() {
+		resp, err := c.Hub.aiService.GenerateResponse(character, chatContent.Content, messages)
+		resultChan <- responseResult{response: resp, err: err}
+	}()
+
+	// Wait for response or timeout
+	var aiResponse string
+	select {
+	case <-ctx.Done():
+		log.Printf("AI response generation timed out for client %s", c.ID)
+		c.sendErrorMessage("Response generation timed out")
 		return
+	case result := <-resultChan:
+		if result.err != nil {
+			log.Printf("Error generating AI response: %v", result.err)
+			c.sendErrorMessage("Failed to generate response from the AI character")
+			return
+		}
+		aiResponse = result.response
 	}
 
 	// Create the character's response message
@@ -289,6 +364,7 @@ func (c *Client) handleChatMessage(message Message) {
 		err := c.Hub.messageService.SaveMessage(c.CharID, c.SessionID, &characterMessage)
 		if err != nil {
 			log.Printf("Error saving character message to database: %v", err)
+			// Continue even if save fails
 		}
 	}
 
@@ -327,11 +403,13 @@ func (c *Client) handleAudioMessage(message Message) {
 	contentBytes, err := json.Marshal(message.Content)
 	if err != nil {
 		log.Printf("Error marshaling audio content: %v", err)
+		c.sendErrorMessage("Error processing audio content")
 		return
 	}
 
 	if err := json.Unmarshal(contentBytes, &audioContent); err != nil {
 		log.Printf("Error unmarshaling audio content: %v", err)
+		c.sendErrorMessage("Invalid audio message format")
 		return
 	}
 
@@ -377,6 +455,12 @@ func (c *Client) handleAudioMessage(message Message) {
 		return
 	}
 
+	// Acknowledge receipt of audio chunk
+	c.sendMessage("ack", map[string]string{
+		"chunkId": chunkID,
+		"status":  "received",
+	})
+
 	// Store audio chunk for ML processing (if audio service is available)
 	if c.Hub.audioService != nil {
 		log.Printf("Audio service is available, attempting to store chunk")
@@ -403,6 +487,7 @@ func (c *Client) handleAudioMessage(message Message) {
 
 			if err != nil {
 				log.Printf("Error storing audio chunk %s: %v", chunkID, err)
+				// Continue even if storage fails
 			} else {
 				log.Printf("Audio chunk %s stored successfully for session %s with ID: %s", chunkID, c.SessionID, chunkId)
 			}
@@ -413,17 +498,48 @@ func (c *Client) handleAudioMessage(message Message) {
 		log.Printf("Warning: Hub.audioService is nil, audio chunk will not be stored")
 	}
 
-	// Process speech to text
+	// Process speech to text with a timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	log.Printf("Sending %d bytes to speech-to-text service", len(audioData))
-	text, err := c.Hub.aiService.SpeechToText(ctx, audioData)
-	if err != nil {
-		log.Printf("Error converting speech to text: %v", err)
-		c.sendErrorMessage("Failed to process speech")
+	// Use a channel to handle the STT response with timeout
+	type sttResult struct {
+		text string
+		err  error
+	}
+	resultChan := make(chan sttResult, 1)
+
+	go func() {
+		text, err := c.Hub.aiService.SpeechToText(ctx, audioData)
+		resultChan <- sttResult{text: text, err: err}
+	}()
+
+	// Wait for response or timeout
+	var text string
+	select {
+	case <-ctx.Done():
+		log.Printf("Speech-to-text processing timed out for client %s", c.ID)
+		c.sendErrorMessage("Speech processing timed out")
+		return
+	case result := <-resultChan:
+		if result.err != nil {
+			log.Printf("Error converting speech to text: %v", result.err)
+			c.sendErrorMessage("Failed to process speech")
+			return
+		}
+		text = result.text
+	}
+
+	// If text is empty, notify the user but don't proceed further
+	if text == "" {
+		c.sendMessage("speech_text", map[string]interface{}{
+			"text":   "",
+			"id":     chunkID,
+			"status": "no_speech_detected",
+		})
 		return
 	}
+
 	log.Printf("Speech-to-text result: %s", text)
 
 	// Create a message from the speech
@@ -471,11 +587,27 @@ func (c *Client) sendMessage(messageType string, content interface{}) {
 
 	// Only log non-ping/pong messages to reduce log noise
 	if messageType != "ping" && messageType != "pong" {
+		logPreview := string(messageJSON)
+		if len(logPreview) > 100 {
+			logPreview = logPreview[:100] + "..."
+		}
 		log.Printf("Sending WebSocket message: type=%s, jsonLength=%d, preview=%s",
-			messageType, len(messageJSON), string(messageJSON[:min(len(messageJSON), 100)]))
+			messageType, len(messageJSON), logPreview)
 	}
 
-	c.Send <- messageJSON
+	// Protect against concurrent writes to the WebSocket
+	c.Hub.mu.Lock()
+	defer c.Hub.mu.Unlock()
+
+	select {
+	case c.Send <- messageJSON:
+		// Message sent to channel for processing
+	default:
+		// Send channel is full or closed
+		log.Printf("Failed to send message to client %s: channel full or closed", c.ID)
+		// Attempt to close connection and unregister client
+		c.Hub.unregister <- c
+	}
 }
 
 // Helper function to avoid panic
@@ -492,11 +624,13 @@ func (c *Client) sendErrorMessage(errorText string) {
 	})
 }
 
+// WritePump pumps messages from the hub to the websocket connection.
 func (c *Client) WritePump() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
 		ticker.Stop()
 		c.Conn.Close()
+		log.Printf("WritePump ended for client: %s", c.ID)
 	}()
 
 	for {
@@ -509,27 +643,28 @@ func (c *Client) WritePump() {
 				return
 			}
 
-			// Send first message
-			if err := c.Conn.WriteMessage(websocket.TextMessage, message); err != nil {
+			w, err := c.Conn.NextWriter(websocket.TextMessage)
+			if err != nil {
+				log.Printf("Error getting next writer: %v", err)
 				return
 			}
+			w.Write(message)
 
-			// Send any queued messages separately instead of combining them
+			// Add queued chat messages to the current websocket message.
 			n := len(c.Send)
-
-			// Silently process any additional queued messages without logging
 			for i := 0; i < n; i++ {
-				extraMsg := <-c.Send
-
-				// Send each message as a separate WebSocket frame
-				if err := c.Conn.WriteMessage(websocket.TextMessage, extraMsg); err != nil {
-					return
-				}
+				w.Write([]byte{'\n'})
+				w.Write(<-c.Send)
 			}
 
+			if err := w.Close(); err != nil {
+				log.Printf("Error closing writer: %v", err)
+				return
+			}
 		case <-ticker.C:
 			c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.Conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				log.Printf("Error sending ping: %v", err)
 				return
 			}
 		}
@@ -605,15 +740,8 @@ func ServeWs(hub *Hub, c *gin.Context) {
 	}
 
 	client.Hub.register <- client
-	log.Printf("New WebSocket connection established for client %s, character %d, session %s",
-		clientID, charIDUint, sessionID)
 
-	// Start the pumps in separate goroutines
+	// Start the client's message pumps
 	go client.WritePump()
 	go client.ReadPump()
-}
-
-// SetAudioService sets the audio service for the hub
-func (h *Hub) SetAudioService(audioService interface{}) {
-	h.audioService = audioService
 }
