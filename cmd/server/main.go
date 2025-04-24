@@ -102,6 +102,7 @@ func main() {
 	authHandler := api.NewAuthHandler(userService)
 	characterHandler := api.NewCharacterHandler(characterService)
 	audioController := api.NewAudioController(audioService, jwtService)
+	messageController := api.NewMessageController(messageService, characterService, aiServiceAdapter, jwtService)
 
 	// Auth routes
 	auth := r.Group("/api/auth")
@@ -122,6 +123,9 @@ func main() {
 
 	// Register audio routes
 	audioController.RegisterRoutes(r)
+
+	// Register message routes
+	messageController.RegisterRoutes(r)
 
 	// WebSocket route
 	r.GET("/ws", func(c *gin.Context) {
