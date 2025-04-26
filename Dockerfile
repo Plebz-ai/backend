@@ -14,8 +14,8 @@ RUN go mod download
 # Copy the source code
 COPY . .
 
-# Build the application with security flags
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -extldflags '-static'" -o main .
+# Build the server application with security flags
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -extldflags '-static'" -o server ./cmd/server
 
 # Use a minimal image for the runtime
 FROM alpine:latest
@@ -32,7 +32,7 @@ RUN apk --no-cache add ca-certificates tzdata
 WORKDIR /app
 
 # Copy binary from builder stage
-COPY --from=builder /app/main .
+COPY --from=builder /app/server .
 
 # Copy any necessary config files
 COPY --from=builder /app/.env .env.example
@@ -52,4 +52,4 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD wget --no-verbose --tries=1 --spider http://localhost:8081/api/health || exit 1
 
 # Run the binary
-CMD ["./main"] 
+CMD ["./server"] 
