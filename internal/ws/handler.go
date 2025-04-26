@@ -227,6 +227,10 @@ func (c *Client) handleMessage(message Message) {
 	case "ping":
 		// Handle ping messages
 		c.sendMessage("pong", nil)
+	case "start_stream":
+		c.handleStartStreamMessage(message)
+	case "stream_config":
+		c.handleStreamConfigMessage(message)
 	default:
 		log.Printf("Unknown message type: %s", message.Type)
 		c.sendErrorMessage(fmt.Sprintf("Unknown message type: %s", message.Type))
@@ -570,6 +574,120 @@ func (c *Client) handleAudioMessage(message Message) {
 			"content":   text,
 			"timestamp": time.Now().Unix(),
 		},
+	})
+}
+
+func (c *Client) handleStartStreamMessage(message Message) {
+	log.Printf("Handling start_stream message from client %s", c.ID)
+
+	// Extract the stream content
+	var streamContent struct {
+		CharacterID  interface{} `json:"character_id"`
+		VideoEnabled bool        `json:"video_enabled"`
+		AudioEnabled bool        `json:"audio_enabled"`
+	}
+
+	contentBytes, err := json.Marshal(message.Content)
+	if err != nil {
+		log.Printf("Error marshaling stream content: %v", err)
+		c.sendErrorMessage("Error processing stream content")
+		return
+	}
+
+	if err := json.Unmarshal(contentBytes, &streamContent); err != nil {
+		log.Printf("Error unmarshaling stream content: %v", err)
+		c.sendErrorMessage("Invalid stream message format")
+		return
+	}
+
+	// Convert character ID to uint if it's a string or number
+	var characterID uint
+	switch id := streamContent.CharacterID.(type) {
+	case string:
+		idUint, err := strconv.ParseUint(id, 10, 32)
+		if err != nil {
+			log.Printf("Error parsing character ID as string: %v", err)
+			c.sendErrorMessage("Invalid character ID format")
+			return
+		}
+		characterID = uint(idUint)
+	case float64:
+		characterID = uint(id)
+	case int:
+		characterID = uint(id)
+	default:
+		// If somehow it's null or something else
+		characterID = c.CharID
+	}
+
+	// Validate character ID
+	if characterID == 0 && c.CharID != 0 {
+		characterID = c.CharID
+	} else if characterID == 0 {
+		c.sendErrorMessage("Character ID is required")
+		return
+	}
+
+	// Get character info
+	_, err = c.Hub.characterService.GetCharacter(characterID)
+	if err != nil {
+		log.Printf("Error getting character for streaming: %v", err)
+		c.sendErrorMessage("Could not find character")
+		return
+	}
+
+	// Acknowledge the stream request
+	c.sendMessage("call_state", map[string]interface{}{
+		"state":        "connecting",
+		"character_id": characterID,
+	})
+
+	// In a real implementation, you would initialize video streaming here
+	// For now, just acknowledge the request
+	log.Printf("Starting stream for client %s with character %d, video: %v, audio: %v",
+		c.ID, characterID, streamContent.VideoEnabled, streamContent.AudioEnabled)
+
+	// Notify client that the stream is ready
+	c.sendMessage("call_state", map[string]interface{}{
+		"state":        "connected",
+		"character_id": characterID,
+	})
+}
+
+// handleStreamConfigMessage handles stream configuration updates
+func (c *Client) handleStreamConfigMessage(message Message) {
+	log.Printf("Handling stream_config message from client %s", c.ID)
+
+	var configContent struct {
+		VideoEnabled *bool `json:"video_enabled,omitempty"`
+		AudioEnabled *bool `json:"audio_enabled,omitempty"`
+	}
+
+	contentBytes, err := json.Marshal(message.Content)
+	if err != nil {
+		log.Printf("Error marshaling stream config content: %v", err)
+		c.sendErrorMessage("Error processing stream config")
+		return
+	}
+
+	if err := json.Unmarshal(contentBytes, &configContent); err != nil {
+		log.Printf("Error unmarshaling stream config content: %v", err)
+		c.sendErrorMessage("Invalid stream config format")
+		return
+	}
+
+	// Log the configuration update
+	if configContent.VideoEnabled != nil {
+		log.Printf("Client %s updated video enabled: %v", c.ID, *configContent.VideoEnabled)
+	}
+
+	if configContent.AudioEnabled != nil {
+		log.Printf("Client %s updated audio enabled: %v", c.ID, *configContent.AudioEnabled)
+	}
+
+	// Acknowledge the configuration update
+	c.sendMessage("stream_config_ack", map[string]interface{}{
+		"status": "ok",
 	})
 }
 
