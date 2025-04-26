@@ -1,0 +1,38 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-character-demo-backend-service
+  labels:
+    app: ai-character-demo-backend
+spec:
+  selector:
+    app: ai-character-demo-backend
+  ports:
+  - port: 80
+    targetPort: 8081
+    protocol: TCP
+  type: ClusterIP
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: audio-data-pvc
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ai-character-demo-secrets
+type: Opaque
+# These values should be base64 encoded in a real deployment
+# The values below are placeholders and should NOT be used in production
+stringData:
+  DB_PASSWORD: replace_with_real_password
+  JWT_SECRET: replace_with_real_secret
+  OPENAI_API_KEY: replace_with_real_key
+  ELEVENLABS_API_KEY: replace_with_real_key 

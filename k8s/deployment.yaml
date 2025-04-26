@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-character-demo-backend
+  labels:
+    app: ai-character-demo-backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ai-character-demo-backend
+  template:
+    metadata:
+      labels:
+        app: ai-character-demo-backend
+    spec:
+      containers:
+      - name: backend
+        image: ${REGISTRY}/ai-character-demo-backend:latest
+        ports:
+        - containerPort: 8081
+        env:
+        - name: PORT
+          value: "8081"
+        - name: ENV
+          value: "production"
+        - name: DB_HOST
+          value: "postgres-service"
+        - name: DB_PORT
+          value: "5432"
+        - name: DB_NAME
+          value: "ai_character_db"
+        - name: DB_USER
+          value: "postgres"
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: ai-character-demo-secrets
+              key: DB_PASSWORD
+        - name: USE_MOCK_AI
+          value: "false"
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: ai-character-demo-secrets
+              key: OPENAI_API_KEY
+        - name: ELEVENLABS_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: ai-character-demo-secrets
+              key: ELEVENLABS_API_KEY
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: ai-character-demo-secrets
+              key: JWT_SECRET
+        - name: AI_LAYER_URL
+          value: "http://ai-layer-service:8000"
+        resources:
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8081
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        volumeMounts:
+        - name: audio-data
+          mountPath: /app/audio_samples
+      volumes:
+      - name: audio-data
+        persistentVolumeClaim:
+          claimName: audio-data-pvc 
