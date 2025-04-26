@@ -2,8 +2,12 @@ package service
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"log"
 	"time"
 
+	"ai-agent-character-demo/backend/ai"
 	"ai-agent-character-demo/backend/internal/models"
 	"ai-agent-character-demo/backend/internal/ws"
 
@@ -148,4 +152,230 @@ func (a *MessageServiceAdapter) GetSessionMessages(characterID uint, sessionID s
 	}
 
 	return wsMessages, nil
+}
+
+// AdapterService handles the connection between the audio service and AI layer
+type AdapterService struct {
+	audioService *AudioService
+	charService  *CharacterService
+	userService  *UserService
+	aiBridge     *ai.AIBridge
+	sessions     map[string]*SessionInfo
+}
+
+// SessionInfo tracks information about an active session
+type SessionInfo struct {
+	UserID      string
+	CharacterID uint
+	AvatarURL   string
+	StartTime   time.Time
+	LastActive  time.Time
+}
+
+// NewAdapterService creates a new adapter service
+func NewAdapterService(audioService *AudioService, charService *CharacterService, userService *UserService) (*AdapterService, error) {
+	aiBridge, err := ai.NewAIBridge()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create AI bridge: %v", err)
+	}
+
+	return &AdapterService{
+		audioService: audioService,
+		charService:  charService,
+		userService:  userService,
+		aiBridge:     aiBridge,
+		sessions:     make(map[string]*SessionInfo),
+	}, nil
+}
+
+// StartSession initializes a new session with the AI
+func (s *AdapterService) StartSession(sessionID, userID string, characterID uint, avatarURL string) error {
+	// Convert userID from string to uint for the user service
+	var userIDUint uint
+	_, err := fmt.Sscanf(userID, "%d", &userIDUint)
+	if err != nil {
+		return fmt.Errorf("invalid user ID format: %v", err)
+	}
+
+	// Check if the user exists
+	user, err := s.userService.GetUserByID(userIDUint)
+	if err != nil {
+		return fmt.Errorf("invalid user: %v", err)
+	}
+
+	// Check if the character exists
+	character, err := s.charService.GetCharacter(characterID)
+	if err != nil {
+		return fmt.Errorf("invalid character: %v", err)
+	}
+
+	// Initialize session context in the AI bridge
+	s.aiBridge.RegisterSession(sessionID, characterID, userID, avatarURL)
+
+	// Record session info
+	s.sessions[sessionID] = &SessionInfo{
+		UserID:      userID,
+		CharacterID: characterID,
+		AvatarURL:   avatarURL,
+		StartTime:   time.Now(),
+		LastActive:  time.Now(),
+	}
+
+	log.Printf("Started session %s for user %s with character %s", sessionID, user.Name, character.Name)
+	return nil
+}
+
+// EndSession cleans up a session
+func (s *AdapterService) EndSession(sessionID string) error {
+	// Check if session exists
+	if _, exists := s.sessions[sessionID]; !exists {
+		return errors.New("session not found")
+	}
+
+	// Clean up in AI bridge
+	s.aiBridge.CleanupSession(sessionID)
+
+	// Remove from our tracking
+	delete(s.sessions, sessionID)
+
+	log.Printf("Ended session %s", sessionID)
+	return nil
+}
+
+// ProcessAudioChunk handles an audio chunk through the AI pipeline
+func (s *AdapterService) ProcessAudioChunk(ctx context.Context, chunkID string) (string, []byte, error) {
+	// Retrieve the chunk
+	chunk, err := s.audioService.GetAudioChunk(chunkID)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to retrieve audio chunk: %v", err)
+	}
+
+	// Update status to processing
+	if err := s.audioService.UpdateProcessingStatus(chunkID, "processing"); err != nil {
+		log.Printf("Warning: Failed to update processing status: %v", err)
+	}
+
+	// Check if session exists and update last active time
+	sessionInfo, exists := s.sessions[chunk.SessionID]
+	if !exists {
+		// Try to create the session if it doesn't exist
+		if err := s.StartSession(chunk.SessionID, chunk.UserID, chunk.CharID, ""); err != nil {
+			return "", nil, fmt.Errorf("session not found and could not be created: %v", err)
+		}
+		sessionInfo = s.sessions[chunk.SessionID]
+	}
+	sessionInfo.LastActive = time.Now()
+
+	// Process through AI bridge
+	transcript, err := s.aiBridge.ProcessAudioChunk(ctx, chunk.SessionID, chunk.AudioData)
+	if err != nil {
+		s.audioService.UpdateProcessingStatus(chunkID, "failed")
+		return "", nil, fmt.Errorf("speech-to-text processing failed: %v", err)
+	}
+
+	// Generate response
+	textResponse, audioResponse, err := s.aiBridge.ProcessTranscript(ctx, chunk.SessionID, transcript)
+	if err != nil {
+		s.audioService.UpdateProcessingStatus(chunkID, "failed")
+		return "", nil, fmt.Errorf("response generation failed: %v", err)
+	}
+
+	// Update status to completed
+	if err := s.audioService.UpdateProcessingStatus(chunkID, "completed"); err != nil {
+		log.Printf("Warning: Failed to update processing status: %v", err)
+	}
+
+	return textResponse, audioResponse, nil
+}
+
+// GetSessionInfo returns information about a session
+func (s *AdapterService) GetSessionInfo(sessionID string) (*SessionInfo, error) {
+	sessionInfo, exists := s.sessions[sessionID]
+	if !exists {
+		return nil, errors.New("session not found")
+	}
+	return sessionInfo, nil
+}
+
+// UpdateAvatarForSession updates the avatar URL for an existing session
+func (s *AdapterService) UpdateAvatarForSession(sessionID string, avatarURL string) error {
+	sessionInfo, exists := s.sessions[sessionID]
+	if !exists {
+		return errors.New("session not found")
+	}
+
+	// Update session info
+	sessionInfo.AvatarURL = avatarURL
+	sessionInfo.LastActive = time.Now()
+
+	// Create an avatar stream in the AI layer
+	err := s.aiBridge.InitAvatarStream(sessionID, avatarURL)
+	if err != nil {
+		return fmt.Errorf("failed to setup avatar: %v", err)
+	}
+
+	return nil
+}
+
+// ListActiveSessions returns a list of all active sessions
+func (s *AdapterService) ListActiveSessions() []*SessionInfo {
+	result := make([]*SessionInfo, 0, len(s.sessions))
+	for _, info := range s.sessions {
+		result = append(result, info)
+	}
+	return result
+}
+
+// CleanupInactiveSessions removes sessions that have been inactive for too long
+func (s *AdapterService) CleanupInactiveSessions(maxInactiveTime time.Duration) int {
+	cutoff := time.Now().Add(-maxInactiveTime)
+	count := 0
+
+	for sessionID, info := range s.sessions {
+		if info.LastActive.Before(cutoff) {
+			s.EndSession(sessionID)
+			count++
+		}
+	}
+
+	return count
+}
+
+// StartCleanupRoutine initiates a background routine to clean up inactive sessions
+func (s *AdapterService) StartCleanupRoutine() {
+	go func() {
+		ticker := time.NewTicker(30 * time.Minute)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			count := s.CleanupInactiveSessions(2 * time.Hour)
+			if count > 0 {
+				log.Printf("Cleaned up %d inactive sessions", count)
+			}
+		}
+	}()
+}
+
+// ProcessAudioData processes audio data directly without storing it as a chunk
+func (s *AdapterService) ProcessAudioData(ctx context.Context, sessionID string, audioData []byte) (string, []byte, error) {
+	// Check if session exists and update last active time
+	sessionInfo, exists := s.sessions[sessionID]
+	if !exists {
+		return "", nil, errors.New("session not found")
+	}
+	sessionInfo.LastActive = time.Now()
+
+	// Process through AI bridge
+	transcript, err := s.aiBridge.ProcessAudioChunk(ctx, sessionID, audioData)
+	if err != nil {
+		return "", nil, fmt.Errorf("speech-to-text processing failed: %v", err)
+	}
+
+	// Generate response
+	textResponse, audioResponse, err := s.aiBridge.ProcessTranscript(ctx, sessionID, transcript)
+	if err != nil {
+		return "", nil, fmt.Errorf("response generation failed: %v", err)
+	}
+
+	return textResponse, audioResponse, nil
 }
