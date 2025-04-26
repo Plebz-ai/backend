@@ -56,7 +56,22 @@ func (h *CharacterHandler) GetCharacter(c *gin.Context) {
 }
 
 func (h *CharacterHandler) ListCharacters(c *gin.Context) {
-	characters, err := h.service.ListCharacters()
+	// Get user ID from the JWT token context
+	userIdInterface, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+
+	// Convert to uint
+	userId, ok := userIdInterface.(uint)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid user ID format"})
+		return
+	}
+
+	// Get characters with conversations involving this user
+	characters, err := h.service.ListCharactersWithConversations(userId)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
