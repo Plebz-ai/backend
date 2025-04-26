@@ -51,7 +51,12 @@ func main() {
 		if origin == "" {
 			origin = "*"
 		}
-		c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
+		// Make sure to allow the frontend port 3001
+		if origin != "*" {
+			c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
+		} else {
+			c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		}
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept, Accept-Encoding, X-CSRF-Token, Authorization, Origin")
 		c.Writer.Header().Set("Access-Control-Max-Age", "86400")
