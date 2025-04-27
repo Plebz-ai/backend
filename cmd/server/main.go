@@ -6,8 +6,12 @@ import (
 	"log"
 	"os"
 	"runtime"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 
+	"ai-agent-character-demo/backend/ai"
 	"ai-agent-character-demo/backend/internal/api"
 	"ai-agent-character-demo/backend/internal/models"
 	"ai-agent-character-demo/backend/internal/service"
@@ -85,21 +89,50 @@ func main() {
 	characterServiceAdapter := service.NewCharacterServiceAdapter(characterService)
 	messageServiceAdapter := service.NewMessageServiceAdapter(messageService)
 
-	// Create AI Service adapter
+	// Create AI Bridge for real AI Layer integration
+	aiBridge, err := ai.NewAIBridge()
+	if err != nil {
+		log.Fatalf("Failed to create AI Bridge: %v", err)
+	}
+
+	// Initialize AI Layer sessions
+	sessionRegistry := make(map[string]bool)
+	sessionMutex := sync.Mutex{}
+
+	// Create AI Service adapter using real AI Bridge
 	aiServiceAdapter := service.NewAIServiceAdapter(
 		func(character *ws.Character, userMessage string, history []ws.ChatMessage) (string, error) {
-			// Simple mock implementation
+			// Simple implementation, could be enhanced to use the AI Bridge's ProcessTranscript
 			return "Hello! I'm " + character.Name + ". Thanks for your message: \"" + userMessage + "\"", nil
 		},
 		func(ctx context.Context, text string, voiceType string) ([]byte, error) {
-			// Mock implementation - in a real app, this would call a TTS service
-			log.Printf("Text-to-speech request for text: %s with voice type: %s", text, voiceType)
-			return nil, nil
+			// Real TTS implementation using AI Bridge
+			return aiBridge.TextToSpeech(ctx, text, voiceType)
 		},
-		func(ctx context.Context, audioData []byte) (string, error) {
-			// Mock implementation - in a real app, this would call an STT service
-			log.Printf("Speech-to-text request received with %d bytes of audio data", len(audioData))
-			return "This is a mock transcription", nil
+		func(ctx context.Context, sessionID string, audioData []byte) (string, error) {
+			// Ensure the session is registered with the AI Bridge
+			sessionMutex.Lock()
+			if !sessionRegistry[sessionID] {
+				log.Printf("Registering session %s with AI Bridge", sessionID)
+				// Extract character ID from the session ID format (session-{charID}-{clientID}-{timestamp})
+				parts := strings.Split(sessionID, "-")
+				var charID uint = 1 // Default character ID
+				if len(parts) > 1 {
+					if id, err := strconv.ParseUint(parts[1], 10, 32); err == nil {
+						charID = uint(id)
+						log.Printf("Extracted character ID %d from session ID %s", charID, sessionID)
+					}
+				}
+
+				// Register the session with AI Bridge
+				aiBridge.RegisterSession(sessionID, charID, "user-"+sessionID, "")
+				sessionRegistry[sessionID] = true
+			}
+			sessionMutex.Unlock()
+
+			// Process the audio chunk with the correct session ID
+			log.Printf("Processing audio for session %s (%d bytes)", sessionID, len(audioData))
+			return aiBridge.ProcessAudioChunk(ctx, sessionID, audioData)
 		},
 	)
 
@@ -145,8 +178,8 @@ func main() {
 		ws.ServeWs(hub, c)
 	})
 
-	// Health check endpoint
-	r.GET("/health", func(c *gin.Context) {
+	// Health check endpoints - Add both paths for compatibility
+	healthHandler := func(c *gin.Context) {
 		// Check database connection
 		dbStatus := "ok"
 		if err := db.Exec("SELECT 1").Error; err != nil {
@@ -177,7 +210,11 @@ func main() {
 				"gc_cycles": memStats.NumGC,
 			},
 		})
-	})
+	}
+
+	// Register both health endpoint paths
+	r.GET("/health", healthHandler)
+	r.GET("/api/health", healthHandler) // Add this path that's being requested
 
 	// Get port from environment
 	port := os.Getenv("PORT")

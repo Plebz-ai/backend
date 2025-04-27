@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -132,58 +133,123 @@ func (b *AIBridge) ProcessAudioChunk(ctx context.Context, sessionID string, audi
 	b.contextMutex.Lock()
 	sessionContext, exists := b.sessionContexts[sessionID]
 	if !exists {
-		b.contextMutex.Unlock()
-		return "", fmt.Errorf("session not found: %s", sessionID)
+		// Auto-create a session context if it doesn't exist
+		log.Printf("Creating new session context for %s in AI Bridge", sessionID)
+		sessionContext = &SessionContext{
+			CharacterID: 1, // Default character ID
+			UserID:      "user-" + sessionID,
+			Messages:    []Message{},
+			LastActive:  time.Now(),
+		}
+		b.sessionContexts[sessionID] = sessionContext
+	} else {
+		sessionContext.LastActive = time.Now()
 	}
-	sessionContext.LastActive = time.Now()
 	b.contextMutex.Unlock()
 
-	// Connect to ASR WebSocket if not already connected
-	wsConn, err := b.getOrCreateWSConnection(sessionID)
+	log.Printf("Processing audio chunk for session %s, audio size: %d bytes", sessionID, len(audioData))
+
+	// Base64 encode the audio data
+	encodedAudio := base64.StdEncoding.EncodeToString(audioData)
+
+	// Create JSON payload
+	payload := map[string]interface{}{
+		"audio_chunk": encodedAudio,
+		"mode":        "normal",
+	}
+
+	jsonData, err := json.Marshal(payload)
 	if err != nil {
-		return "", fmt.Errorf("failed to establish WebSocket connection: %v", err)
+		return "", fmt.Errorf("failed to marshal audio data: %v", err)
 	}
 
-	// Send audio data to WebSocket
-	err = wsConn.WriteMessage(websocket.BinaryMessage, audioData)
-	if err != nil {
-		// Close and remove the connection if there's an error
-		b.connMutex.Lock()
-		wsConn.Close()
-		delete(b.wsConnections, sessionID)
-		b.connMutex.Unlock()
-		return "", fmt.Errorf("failed to send audio data: %v", err)
+	// Try multiple endpoint combinations to handle potential routing issues
+	endpoints := []string{
+		"/pipeline/process_audio",
+		"/audio",
+		"/api/pipeline/process_audio",
+		"/api/audio",
+		"/process_audio",
+		"/v1/pipeline/process_audio",
+		"/v1/audio",
 	}
 
-	// Wait for response (non-blocking with timeout)
-	responseChan := make(chan string, 1)
-	errorChan := make(chan error, 1)
+	alternateURLs := []string{
+		b.aiLayerURL,            // Original URL (whisper_service:8000)
+		"http://localhost:8000", // Try localhost
+	}
 
-	go func() {
-		_, message, err := wsConn.ReadMessage()
-		if err != nil {
-			errorChan <- fmt.Errorf("failed to read WebSocket message: %v", err)
-			return
+	var lastErr error
+
+	// Try each endpoint with each base URL
+	for _, baseURL := range alternateURLs {
+		for _, endpoint := range endpoints {
+			fullURL := fmt.Sprintf("%s%s", baseURL, endpoint)
+			log.Printf("Trying AI Layer URL: %s", fullURL)
+
+			req, err := http.NewRequestWithContext(ctx, "POST", fullURL, bytes.NewBuffer(jsonData))
+			if err != nil {
+				lastErr = err
+				continue
+			}
+
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Session-ID", sessionID)
+			req.Header.Set("Accept", "application/json")
+
+			log.Printf("Sending audio to AI Layer for transcription (session: %s, endpoint: %s)...", sessionID, endpoint)
+
+			resp, err := b.httpClient.Do(req)
+			if err != nil {
+				log.Printf("Connection error for %s: %v", fullURL, err)
+				lastErr = err
+				continue
+			}
+
+			// Check response
+			if resp.StatusCode != http.StatusOK {
+				bodyBytes, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				log.Printf("Endpoint %s returned status %d: %s", fullURL, resp.StatusCode, string(bodyBytes))
+				lastErr = fmt.Errorf("AI Layer returned error status %d: %s", resp.StatusCode, string(bodyBytes))
+				continue
+			}
+
+			// Parse response
+			var transcriptResponse struct {
+				Transcripts []string `json:"transcripts"`
+			}
+
+			err = json.NewDecoder(resp.Body).Decode(&transcriptResponse)
+			resp.Body.Close()
+			if err != nil {
+				log.Printf("Error parsing response from %s: %v", fullURL, err)
+				lastErr = err
+				continue
+			}
+
+			// Success case
+			if len(transcriptResponse.Transcripts) > 0 {
+				transcript := strings.Join(transcriptResponse.Transcripts, " ")
+				log.Printf("Transcript generated using endpoint %s: %s", fullURL, transcript)
+
+				// Save the working URL for future requests
+				if baseURL != b.aiLayerURL || endpoint != "/pipeline/process_audio" {
+					log.Printf("Updating AI Layer URL from %s to %s for future requests",
+						b.aiLayerURL+"/pipeline/process_audio", fullURL)
+					// Extract the base URL without the endpoint
+					b.aiLayerURL = baseURL
+				}
+
+				return transcript, nil
+			}
+
+			log.Printf("No transcripts returned from %s", fullURL)
 		}
-
-		var response AILayerResponse
-		if err := json.Unmarshal(message, &response); err != nil {
-			errorChan <- fmt.Errorf("failed to unmarshal response: %v", err)
-			return
-		}
-
-		responseChan <- response.Transcripts
-	}()
-
-	// Wait for response with timeout
-	select {
-	case transcript := <-responseChan:
-		return transcript, nil
-	case err := <-errorChan:
-		return "", err
-	case <-time.After(5 * time.Second):
-		return "", fmt.Errorf("timeout waiting for transcription")
 	}
+
+	// If we reach here, all attempts failed
+	return "", fmt.Errorf("failed to get transcription after trying multiple endpoints: %v", lastErr)
 }
 
 // ProcessTranscript processes a transcript through the backend AI service
