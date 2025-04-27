@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"sync"
@@ -132,58 +133,74 @@ func (b *AIBridge) ProcessAudioChunk(ctx context.Context, sessionID string, audi
 	b.contextMutex.Lock()
 	sessionContext, exists := b.sessionContexts[sessionID]
 	if !exists {
-		b.contextMutex.Unlock()
-		return "", fmt.Errorf("session not found: %s", sessionID)
+		// Auto-create a session context if it doesn't exist
+		log.Printf("Creating new session context for %s in AI Bridge", sessionID)
+		sessionContext = &SessionContext{
+			CharacterID: 1, // Default character ID
+			UserID:      "user-" + sessionID,
+			Messages:    []Message{},
+			LastActive:  time.Now(),
+		}
+		b.sessionContexts[sessionID] = sessionContext
+	} else {
+		sessionContext.LastActive = time.Now()
 	}
-	sessionContext.LastActive = time.Now()
 	b.contextMutex.Unlock()
 
-	// Connect to ASR WebSocket if not already connected
-	wsConn, err := b.getOrCreateWSConnection(sessionID)
+	log.Printf("Processing audio chunk for session %s, audio size: %d bytes", sessionID, len(audioData))
+
+	transcript, err := b.TranscribeAudio(ctx, audioData)
 	if err != nil {
-		return "", fmt.Errorf("failed to establish WebSocket connection: %v", err)
+		return "", fmt.Errorf("failed to transcribe audio: %v", err)
 	}
 
-	// Send audio data to WebSocket
-	err = wsConn.WriteMessage(websocket.BinaryMessage, audioData)
+	return transcript, nil
+}
+
+// Updated TranscribeAudio to use the new AI Layer endpoints
+func (b *AIBridge) TranscribeAudio(ctx context.Context, audioData []byte) (string, error) {
+	url := fmt.Sprintf("%s/process_audio", b.aiLayerURL)
+
+	// Create a new request
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, err := writer.CreateFormFile("audio", "audio.wav")
 	if err != nil {
-		// Close and remove the connection if there's an error
-		b.connMutex.Lock()
-		wsConn.Close()
-		delete(b.wsConnections, sessionID)
-		b.connMutex.Unlock()
-		return "", fmt.Errorf("failed to send audio data: %v", err)
+		return "", fmt.Errorf("failed to create form file: %v", err)
+	}
+	if _, err := part.Write(audioData); err != nil {
+		return "", fmt.Errorf("failed to write audio data: %v", err)
+	}
+	writer.Close()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, body)
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %v", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	resp, err := b.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to send request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("transcription service returned status %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	// Wait for response (non-blocking with timeout)
-	responseChan := make(chan string, 1)
-	errorChan := make(chan error, 1)
-
-	go func() {
-		_, message, err := wsConn.ReadMessage()
-		if err != nil {
-			errorChan <- fmt.Errorf("failed to read WebSocket message: %v", err)
-			return
-		}
-
-		var response AILayerResponse
-		if err := json.Unmarshal(message, &response); err != nil {
-			errorChan <- fmt.Errorf("failed to unmarshal response: %v", err)
-			return
-		}
-
-		responseChan <- response.Transcripts
-	}()
-
-	// Wait for response with timeout
-	select {
-	case transcript := <-responseChan:
-		return transcript, nil
-	case err := <-errorChan:
-		return "", err
-	case <-time.After(5 * time.Second):
-		return "", fmt.Errorf("timeout waiting for transcription")
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("failed to decode response: %v", err)
 	}
+
+	transcript, ok := result["transcript"].(string)
+	if !ok {
+		return "", fmt.Errorf("transcription service response missing 'transcript' field")
+	}
+
+	return transcript, nil
 }
 
 // ProcessTranscript processes a transcript through the backend AI service
@@ -238,7 +255,7 @@ func (b *AIBridge) ProcessTranscript(ctx context.Context, sessionID string, tran
 	b.contextMutex.Unlock()
 
 	// Generate speech from text response
-	audioData, err := b.TextToSpeech(ctx, textResponse, character.VoiceType)
+	audioData, err := b.openAIService.TextToSpeech(ctx, textResponse, character.VoiceType)
 	if err != nil {
 		log.Printf("Failed to generate speech: %v", err)
 		// Continue without audio if TTS fails
@@ -256,50 +273,9 @@ func (b *AIBridge) ProcessTranscript(ctx context.Context, sessionID string, tran
 	return textResponse, audioData, nil
 }
 
-// TextToSpeech generates speech from text using the AI Layer TTS service
+// Replace the AI-Layer TTS proxy with internal AIService.TextToSpeech
 func (b *AIBridge) TextToSpeech(ctx context.Context, text string, voiceType string) ([]byte, error) {
-	// Call the TTS service from the AI Layer
-	url := fmt.Sprintf("%s/tts/synthesize", b.aiLayerURL)
-
-	payload := map[string]string{
-		"text":     text,
-		"voice_id": voiceType,
-	}
-
-	jsonData, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("error marshaling TTS request: %v", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return nil, fmt.Errorf("error creating TTS request: %v", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	// Add API key if needed
-	elevenLabsKey := os.Getenv("ELEVENLABS_API_KEY")
-	if elevenLabsKey != "" {
-		req.Header.Set("xi-api-key", elevenLabsKey)
-	}
-
-	resp, err := b.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("error making TTS API request: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("TTS API request failed with status code %d: %s", resp.StatusCode, string(bodyBytes))
-	}
-
-	audioData, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("error reading TTS response: %v", err)
-	}
-
-	return audioData, nil
+	return b.openAIService.TextToSpeech(ctx, text, voiceType)
 }
 
 // SendAudioToAvatar sends the generated audio to the avatar animation service

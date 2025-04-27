@@ -7,7 +7,7 @@ services:
       dockerfile: Dockerfile
     container_name: ai-character-demo-backend
     ports:
-      - "8081:8081"
+      - "8082:8081" # Changed host port to 8082 to avoid conflict
     environment:
       - PORT=8081
       - ENV=production
@@ -20,12 +20,20 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
       - JWT_SECRET=${JWT_SECRET}
-      - AI_LAYER_URL=${AI_LAYER_URL}
+      - AI_LAYER_URL=http://transcription_service:5000
     depends_on:
-      - db
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
     volumes:
       - ./audio_samples:/app/audio_samples
     restart: unless-stopped
+    networks:
+      - ai-character-network
+      - ai-layer-network
+      - default
+      - shared-network
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8081/api/health"]
       interval: 30s
@@ -45,11 +53,30 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
+    networks:
+      - default
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:latest
+    ports:
+      - "6379:6379"
+    networks:
+      - ai-character-network
+
 volumes:
-  postgres_data: 
+  postgres_data:
+
+networks:
+  ai-character-network:
+    name: ai-character-network
+    external: true
+  ai-layer-network:
+    external: true
+  shared-network:
+    external: true
+  default:

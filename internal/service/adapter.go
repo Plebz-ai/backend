@@ -48,14 +48,14 @@ func (a *CharacterServiceAdapter) GetCharacter(id uint) (*ws.Character, error) {
 type AIServiceAdapter struct {
 	generateResponseFn func(character *ws.Character, userMessage string, history []ws.ChatMessage) (string, error)
 	textToSpeechFn     func(ctx context.Context, text string, voiceType string) ([]byte, error)
-	speechToTextFn     func(ctx context.Context, audioData []byte) (string, error)
+	speechToTextFn     func(ctx context.Context, sessionID string, audioData []byte) (string, error)
 }
 
 // NewAIServiceAdapter creates a new adapter for an AI service
 func NewAIServiceAdapter(
 	generateResponseFn func(character *ws.Character, userMessage string, history []ws.ChatMessage) (string, error),
 	textToSpeechFn func(ctx context.Context, text string, voiceType string) ([]byte, error),
-	speechToTextFn func(ctx context.Context, audioData []byte) (string, error),
+	speechToTextFn func(ctx context.Context, sessionID string, audioData []byte) (string, error),
 ) *AIServiceAdapter {
 	return &AIServiceAdapter{
 		generateResponseFn: generateResponseFn,
@@ -75,8 +75,8 @@ func (a *AIServiceAdapter) TextToSpeech(ctx context.Context, text string, voiceT
 }
 
 // SpeechToText implements the ws.AIService interface
-func (a *AIServiceAdapter) SpeechToText(ctx context.Context, audioData []byte) (string, error) {
-	return a.speechToTextFn(ctx, audioData)
+func (a *AIServiceAdapter) SpeechToText(ctx context.Context, sessionID string, audioData []byte) (string, error) {
+	return a.speechToTextFn(ctx, sessionID, audioData)
 }
 
 // MessageService handles message persistence

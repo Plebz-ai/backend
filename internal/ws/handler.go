@@ -72,7 +72,7 @@ type CharacterService interface {
 type AIService interface {
 	GenerateResponse(character *Character, userMessage string, conversationHistory []ChatMessage) (string, error)
 	TextToSpeech(ctx context.Context, text string, voiceType string) ([]byte, error)
-	SpeechToText(ctx context.Context, audioData []byte) (string, error)
+	SpeechToText(ctx context.Context, sessionID string, audioData []byte) (string, error)
 }
 
 // MessageService defines the interface for message persistence operations
@@ -466,6 +466,7 @@ func (c *Client) handleAudioMessage(message Message) {
 	})
 
 	// Store audio chunk for ML processing (if audio service is available)
+	var storedChunkId string
 	if c.Hub.audioService != nil {
 		log.Printf("Audio service is available, attempting to store chunk")
 		// Try to cast the interface to an AudioService
@@ -476,7 +477,8 @@ func (c *Client) handleAudioMessage(message Message) {
 
 			ttl := 24 * time.Hour // Default TTL
 
-			chunkId, err := audioService.StoreAudioChunk(
+			var err error
+			storedChunkId, err = audioService.StoreAudioChunk(
 				c.UserID,
 				c.SessionID,
 				c.CharID,
@@ -493,7 +495,7 @@ func (c *Client) handleAudioMessage(message Message) {
 				log.Printf("Error storing audio chunk %s: %v", chunkID, err)
 				// Continue even if storage fails
 			} else {
-				log.Printf("Audio chunk %s stored successfully for session %s with ID: %s", chunkID, c.SessionID, chunkId)
+				log.Printf("Audio chunk %s stored successfully for session %s with ID: %s", chunkID, c.SessionID, storedChunkId)
 			}
 		} else {
 			log.Printf("Error: audioService could not be cast to AudioService interface")
@@ -513,8 +515,11 @@ func (c *Client) handleAudioMessage(message Message) {
 	}
 	resultChan := make(chan sttResult, 1)
 
+	// IMPORTANT: Use the client's session ID for STT processing, not a random one
+	log.Printf("Using session ID %s for STT processing", c.SessionID)
+	
 	go func() {
-		text, err := c.Hub.aiService.SpeechToText(ctx, audioData)
+		text, err := c.Hub.aiService.SpeechToText(ctx, c.SessionID, audioData)
 		resultChan <- sttResult{text: text, err: err}
 	}()
 
