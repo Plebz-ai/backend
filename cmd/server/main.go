@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"runtime"
 	"strconv"
@@ -19,9 +20,40 @@ import (
 	"ai-agent-character-demo/backend/pkg/config"
 	"ai-agent-character-demo/backend/pkg/jwt"
 
+	"github.com/gorilla/websocket"
+
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 )
+
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		return true // Allow all origins for simplicity; adjust for production
+	},
+}
+
+func handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println("WebSocket upgrade error:", err)
+		return
+	}
+	defer conn.Close()
+
+	for {
+		messageType, p, err := conn.ReadMessage()
+		if err != nil {
+			log.Println("WebSocket read error:", err)
+			break
+		}
+
+		// Echo the message back for now; replace with actual processing
+		if err := conn.WriteMessage(messageType, p); err != nil {
+			log.Println("WebSocket write error:", err)
+			break
+		}
+	}
+}
 
 func main() {
 	// Load environment variables
@@ -177,6 +209,9 @@ func main() {
 	r.GET("/ws", func(c *gin.Context) {
 		ws.ServeWs(hub, c)
 	})
+
+	http.HandleFunc("/ws", handleWebSocket)
+	log.Println("WebSocket server started on /ws")
 
 	// Health check endpoints - Add both paths for compatibility
 	healthHandler := func(c *gin.Context) {

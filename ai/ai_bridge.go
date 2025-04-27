@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime/multipart"
 	"net/http"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -149,107 +149,58 @@ func (b *AIBridge) ProcessAudioChunk(ctx context.Context, sessionID string, audi
 
 	log.Printf("Processing audio chunk for session %s, audio size: %d bytes", sessionID, len(audioData))
 
-	// Base64 encode the audio data
-	encodedAudio := base64.StdEncoding.EncodeToString(audioData)
-
-	// Create JSON payload
-	payload := map[string]interface{}{
-		"audio_chunk": encodedAudio,
-		"mode":        "normal",
-	}
-
-	jsonData, err := json.Marshal(payload)
+	transcript, err := b.TranscribeAudio(ctx, audioData)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal audio data: %v", err)
+		return "", fmt.Errorf("failed to transcribe audio: %v", err)
 	}
 
-	// Try multiple endpoint combinations to handle potential routing issues
-	endpoints := []string{
-		"/pipeline/process_audio",
-		"/audio",
-		"/api/pipeline/process_audio",
-		"/api/audio",
-		"/process_audio",
-		"/v1/pipeline/process_audio",
-		"/v1/audio",
+	return transcript, nil
+}
+
+// Updated TranscribeAudio to use the new AI Layer endpoints
+func (b *AIBridge) TranscribeAudio(ctx context.Context, audioData []byte) (string, error) {
+	url := fmt.Sprintf("%s/process_audio", b.aiLayerURL)
+
+	// Create a new request
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, err := writer.CreateFormFile("audio", "audio.wav")
+	if err != nil {
+		return "", fmt.Errorf("failed to create form file: %v", err)
+	}
+	if _, err := part.Write(audioData); err != nil {
+		return "", fmt.Errorf("failed to write audio data: %v", err)
+	}
+	writer.Close()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, body)
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %v", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	resp, err := b.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to send request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("transcription service returned status %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	alternateURLs := []string{
-		b.aiLayerURL,            // Original URL (whisper_service:8000)
-		"http://localhost:8000", // Try localhost
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("failed to decode response: %v", err)
 	}
 
-	var lastErr error
-
-	// Try each endpoint with each base URL
-	for _, baseURL := range alternateURLs {
-		for _, endpoint := range endpoints {
-			fullURL := fmt.Sprintf("%s%s", baseURL, endpoint)
-			log.Printf("Trying AI Layer URL: %s", fullURL)
-
-			req, err := http.NewRequestWithContext(ctx, "POST", fullURL, bytes.NewBuffer(jsonData))
-			if err != nil {
-				lastErr = err
-				continue
-			}
-
-			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("X-Session-ID", sessionID)
-			req.Header.Set("Accept", "application/json")
-
-			log.Printf("Sending audio to AI Layer for transcription (session: %s, endpoint: %s)...", sessionID, endpoint)
-
-			resp, err := b.httpClient.Do(req)
-			if err != nil {
-				log.Printf("Connection error for %s: %v", fullURL, err)
-				lastErr = err
-				continue
-			}
-
-			// Check response
-			if resp.StatusCode != http.StatusOK {
-				bodyBytes, _ := io.ReadAll(resp.Body)
-				resp.Body.Close()
-				log.Printf("Endpoint %s returned status %d: %s", fullURL, resp.StatusCode, string(bodyBytes))
-				lastErr = fmt.Errorf("AI Layer returned error status %d: %s", resp.StatusCode, string(bodyBytes))
-				continue
-			}
-
-			// Parse response
-			var transcriptResponse struct {
-				Transcripts []string `json:"transcripts"`
-			}
-
-			err = json.NewDecoder(resp.Body).Decode(&transcriptResponse)
-			resp.Body.Close()
-			if err != nil {
-				log.Printf("Error parsing response from %s: %v", fullURL, err)
-				lastErr = err
-				continue
-			}
-
-			// Success case
-			if len(transcriptResponse.Transcripts) > 0 {
-				transcript := strings.Join(transcriptResponse.Transcripts, " ")
-				log.Printf("Transcript generated using endpoint %s: %s", fullURL, transcript)
-
-				// Save the working URL for future requests
-				if baseURL != b.aiLayerURL || endpoint != "/pipeline/process_audio" {
-					log.Printf("Updating AI Layer URL from %s to %s for future requests",
-						b.aiLayerURL+"/pipeline/process_audio", fullURL)
-					// Extract the base URL without the endpoint
-					b.aiLayerURL = baseURL
-				}
-
-				return transcript, nil
-			}
-
-			log.Printf("No transcripts returned from %s", fullURL)
-		}
+	transcript, ok := result["transcript"].(string)
+	if !ok {
+		return "", fmt.Errorf("transcription service response missing 'transcript' field")
 	}
 
-	// If we reach here, all attempts failed
-	return "", fmt.Errorf("failed to get transcription after trying multiple endpoints: %v", lastErr)
+	return transcript, nil
 }
 
 // ProcessTranscript processes a transcript through the backend AI service
@@ -304,7 +255,7 @@ func (b *AIBridge) ProcessTranscript(ctx context.Context, sessionID string, tran
 	b.contextMutex.Unlock()
 
 	// Generate speech from text response
-	audioData, err := b.TextToSpeech(ctx, textResponse, character.VoiceType)
+	audioData, err := b.openAIService.TextToSpeech(ctx, textResponse, character.VoiceType)
 	if err != nil {
 		log.Printf("Failed to generate speech: %v", err)
 		// Continue without audio if TTS fails
@@ -322,50 +273,9 @@ func (b *AIBridge) ProcessTranscript(ctx context.Context, sessionID string, tran
 	return textResponse, audioData, nil
 }
 
-// TextToSpeech generates speech from text using the AI Layer TTS service
+// Replace the AI-Layer TTS proxy with internal AIService.TextToSpeech
 func (b *AIBridge) TextToSpeech(ctx context.Context, text string, voiceType string) ([]byte, error) {
-	// Call the TTS service from the AI Layer
-	url := fmt.Sprintf("%s/tts/synthesize", b.aiLayerURL)
-
-	payload := map[string]string{
-		"text":     text,
-		"voice_id": voiceType,
-	}
-
-	jsonData, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("error marshaling TTS request: %v", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return nil, fmt.Errorf("error creating TTS request: %v", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	// Add API key if needed
-	elevenLabsKey := os.Getenv("ELEVENLABS_API_KEY")
-	if elevenLabsKey != "" {
-		req.Header.Set("xi-api-key", elevenLabsKey)
-	}
-
-	resp, err := b.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("error making TTS API request: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("TTS API request failed with status code %d: %s", resp.StatusCode, string(bodyBytes))
-	}
-
-	audioData, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("error reading TTS response: %v", err)
-	}
-
-	return audioData, nil
+	return b.openAIService.TextToSpeech(ctx, text, voiceType)
 }
 
 // SendAudioToAvatar sends the generated audio to the avatar animation service
