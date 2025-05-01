@@ -53,9 +53,9 @@ type CreateStreamResponse struct {
 
 // NewAIBridge creates a new instance of the AIBridge
 func NewAIBridge() (*AIBridge, error) {
-	aiLayerURL := os.Getenv("AI_LAYER_URL")
+	aiLayerURL := os.Getenv("AI_SERVICE_URL")
 	if aiLayerURL == "" {
-		aiLayerURL = "http://localhost:8000"
+		aiLayerURL = "http://localhost:5000"
 	}
 
 	openAIService, err := NewAIService()
