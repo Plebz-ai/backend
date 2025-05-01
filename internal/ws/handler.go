@@ -72,7 +72,7 @@ type CharacterService interface {
 type AIService interface {
 	GenerateResponse(character *Character, userMessage string, conversationHistory []ChatMessage) (string, error)
 	TextToSpeech(ctx context.Context, text string, voiceType string) ([]byte, error)
-	SpeechToText(ctx context.Context, sessionID string, audioData []byte) (string, error)
+	SpeechToText(ctx context.Context, sessionID string, audioData []byte) (string, string, error)
 }
 
 // MessageService defines the interface for message persistence operations
@@ -435,10 +435,10 @@ func (c *Client) handleAudioMessage(message Message) {
 	case string:
 		// Handle base64 encoded string
 		log.Printf("Received base64 encoded string, length: %d", len(data))
-		var err error
-		audioData, err = base64.StdEncoding.DecodeString(data)
-		if err != nil {
-			log.Printf("Error decoding base64 audio data: %v", err)
+		var decodeErr error
+		audioData, decodeErr = base64.StdEncoding.DecodeString(data)
+		if decodeErr != nil {
+			log.Printf("Error decoding base64 audio data: %v", decodeErr)
 			c.sendErrorMessage("Failed to process audio data")
 			return
 		}
@@ -461,8 +461,8 @@ func (c *Client) handleAudioMessage(message Message) {
 
 	// Acknowledge receipt of audio chunk
 	c.sendMessage("ack", map[string]string{
-		"chunkId": chunkID,
-		"status":  "received",
+		"messageId": chunkID,
+		"status":    "received",
 	})
 
 	// Store audio chunk for ML processing (if audio service is available)
@@ -477,8 +477,8 @@ func (c *Client) handleAudioMessage(message Message) {
 
 			ttl := 24 * time.Hour // Default TTL
 
-			var err error
-			storedChunkId, err = audioService.StoreAudioChunk(
+			var storeErr error
+			storedChunkId, storeErr = audioService.StoreAudioChunk(
 				c.UserID,
 				c.SessionID,
 				c.CharID,
@@ -491,8 +491,8 @@ func (c *Client) handleAudioMessage(message Message) {
 				ttl,
 			)
 
-			if err != nil {
-				log.Printf("Error storing audio chunk %s: %v", chunkID, err)
+			if storeErr != nil {
+				log.Printf("Error storing audio chunk %s: %v", chunkID, storeErr)
 				// Continue even if storage fails
 			} else {
 				log.Printf("Audio chunk %s stored successfully for session %s with ID: %s", chunkID, c.SessionID, storedChunkId)
@@ -510,21 +510,23 @@ func (c *Client) handleAudioMessage(message Message) {
 
 	// Use a channel to handle the STT response with timeout
 	type sttResult struct {
-		text string
-		err  error
+		transcript string
+		aiResponse string
+		err        error
 	}
 	resultChan := make(chan sttResult, 1)
 
 	// IMPORTANT: Use the client's session ID for STT processing, not a random one
 	log.Printf("Using session ID %s for STT processing", c.SessionID)
-	
+
 	go func() {
-		text, err := c.Hub.aiService.SpeechToText(ctx, c.SessionID, audioData)
-		resultChan <- sttResult{text: text, err: err}
+		transcript, aiResponse, sttErr := c.Hub.aiService.SpeechToText(ctx, c.SessionID, audioData)
+		resultChan <- sttResult{transcript: transcript, aiResponse: aiResponse, err: sttErr}
 	}()
 
 	// Wait for response or timeout
-	var text string
+	var transcript string
+	var aiResponse string
 	select {
 	case <-ctx.Done():
 		log.Printf("Speech-to-text processing timed out for client %s", c.ID)
@@ -536,11 +538,15 @@ func (c *Client) handleAudioMessage(message Message) {
 			c.sendErrorMessage("Failed to process speech")
 			return
 		}
-		text = result.text
+		transcript = result.transcript
+		aiResponse = result.aiResponse
+		log.Printf("Got transcript: '%s' and AI response: '%s'",
+			transcript,
+			aiResponse[:min(50, len(aiResponse))])
 	}
 
-	// If text is empty, notify the user but don't proceed further
-	if text == "" {
+	// If transcript is empty, notify the user but don't proceed further
+	if transcript == "" {
 		c.sendMessage("speech_text", map[string]interface{}{
 			"text":   "",
 			"id":     chunkID,
@@ -549,37 +555,150 @@ func (c *Client) handleAudioMessage(message Message) {
 		return
 	}
 
-	log.Printf("Speech-to-text result: %s", text)
-
 	// Create a message from the speech
 	userMessage := ChatMessage{
 		ID:        fmt.Sprintf("speech-%d", time.Now().UnixNano()),
 		Sender:    "user",
-		Content:   text,
+		Content:   transcript,
 		Timestamp: time.Now(),
 	}
 
 	// Send the transcribed text back to the client
 	c.sendMessage("speech_text", map[string]interface{}{
-		"text": text,
+		"text": transcript,
 		"id":   userMessage.ID,
 	})
 
-	// Handle as a chat message
+	// Store the user message in conversation history
 	c.messagesMu.Lock()
 	c.messages = append(c.messages, userMessage)
 	c.messagesMu.Unlock()
 
-	// Now handle the message as a chat message
-	c.handleChatMessage(Message{
-		Type: "chat",
-		Content: map[string]interface{}{
-			"id":        userMessage.ID,
-			"sender":    "user",
-			"content":   text,
-			"timestamp": time.Now().Unix(),
-		},
+	// Save the message to persistent storage
+	if c.SessionID != "" {
+		saveErr := c.Hub.messageService.SaveMessage(c.CharID, c.SessionID, &userMessage)
+		if saveErr != nil {
+			log.Printf("Error saving message to database: %v", saveErr)
+			// Continue processing even if save fails
+		}
+	}
+
+	// Acknowledge receipt of message
+	c.sendMessage("ack", map[string]string{
+		"messageId": userMessage.ID,
+		"status":    "received",
 	})
+
+	// Notify client that character is typing
+	c.sendMessage("typing", map[string]interface{}{
+		"is_typing": true,
+	})
+
+	// Here's the key change: If we have an AI response from LLM_Layer, use that
+	// Otherwise fallback to generating a response with the internal AI service
+	var characterResponse string
+	var audioResponse []byte
+
+	// Check if we have a valid AI response from our LLM_Layer
+	if aiResponse != "" {
+		log.Printf("Using AI response from LLM_Layer for client %s", c.ID)
+		characterResponse = aiResponse
+
+		// Generate TTS for the AI response
+		audioCtx, audioCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer audioCancel()
+
+		var ttsErr error
+		audioResponse, ttsErr = c.Hub.aiService.TextToSpeech(audioCtx, characterResponse, "default")
+		if ttsErr != nil {
+			log.Printf("Error generating speech for LLM response: %v", ttsErr)
+			// Continue without audio
+		}
+	} else {
+		// Fetch character data
+		character, charErr := c.Hub.characterService.GetCharacter(c.CharID)
+		if charErr != nil {
+			log.Printf("Error fetching character: %v", charErr)
+			c.sendErrorMessage("Failed to fetch character information")
+			return
+		}
+
+		// Generate AI response with timeout
+		aiCtx, aiCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer aiCancel()
+
+		// Use a channel to handle the AI response with timeout
+		type responseResult struct {
+			response string
+			err      error
+		}
+		aiResultChan := make(chan responseResult, 1)
+
+		go func() {
+			resp, respErr := c.Hub.aiService.GenerateResponse(character, transcript, c.messages)
+			aiResultChan <- responseResult{response: resp, err: respErr}
+		}()
+
+		// Wait for response or timeout
+		select {
+		case <-aiCtx.Done():
+			log.Printf("AI response generation timed out for client %s", c.ID)
+			c.sendErrorMessage("Response generation timed out")
+			return
+		case result := <-aiResultChan:
+			if result.err != nil {
+				log.Printf("Error generating AI response: %v", result.err)
+				c.sendErrorMessage("Failed to generate response from the AI character")
+				return
+			}
+			characterResponse = result.response
+		}
+
+		// Generate speech asynchronously if configured
+		audioCtx, audioCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer audioCancel()
+
+		var ttsErr error
+		audioResponse, ttsErr = c.Hub.aiService.TextToSpeech(audioCtx, characterResponse, character.VoiceType)
+		if ttsErr != nil {
+			log.Printf("Error generating speech: %v", ttsErr)
+			// Continue without audio
+		}
+	}
+
+	// Create the character's response message
+	characterMessage := ChatMessage{
+		ID:        fmt.Sprintf("resp-%d", time.Now().UnixNano()),
+		Sender:    "character",
+		Content:   characterResponse,
+		Timestamp: time.Now(),
+	}
+
+	// Store the character message in conversation history
+	c.messagesMu.Lock()
+	c.messages = append(c.messages, characterMessage)
+	c.messagesMu.Unlock()
+
+	// Save the character's response to persistent storage
+	if c.SessionID != "" {
+		saveErr := c.Hub.messageService.SaveMessage(c.CharID, c.SessionID, &characterMessage)
+		if saveErr != nil {
+			log.Printf("Error saving character message to database: %v", saveErr)
+			// Continue even if save fails
+		}
+	}
+
+	// Send the character's response
+	c.sendMessage("chat", characterMessage)
+
+	// Send audio if we have it
+	if audioResponse != nil {
+		// Send the audio data
+		c.sendMessage("audio", map[string]interface{}{
+			"data":      audioResponse,
+			"messageId": characterMessage.ID,
+		})
+	}
 }
 
 func (c *Client) handleStartStreamMessage(message Message) {

@@ -31,7 +31,7 @@ func NewDB() (*gorm.DB, error) {
 
 	dbname := os.Getenv("DB_NAME")
 	if dbname == "" {
-		dbname = "characters"
+		dbname = "ai_character_db"
 	}
 
 	dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",

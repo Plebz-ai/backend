@@ -32,6 +32,14 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
+// Helper function to get minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -134,14 +142,14 @@ func main() {
 	// Create AI Service adapter using real AI Bridge
 	aiServiceAdapter := service.NewAIServiceAdapter(
 		func(character *ws.Character, userMessage string, history []ws.ChatMessage) (string, error) {
-			// Simple implementation, could be enhanced to use the AI Bridge's ProcessTranscript
+			// Use the character's data to generate a response
 			return "Hello! I'm " + character.Name + ". Thanks for your message: \"" + userMessage + "\"", nil
 		},
 		func(ctx context.Context, text string, voiceType string) ([]byte, error) {
 			// Real TTS implementation using AI Bridge
 			return aiBridge.TextToSpeech(ctx, text, voiceType)
 		},
-		func(ctx context.Context, sessionID string, audioData []byte) (string, error) {
+		func(ctx context.Context, sessionID string, audioData []byte) (string, string, error) {
 			// Ensure the session is registered with the AI Bridge
 			sessionMutex.Lock()
 			if !sessionRegistry[sessionID] {
@@ -164,7 +172,18 @@ func main() {
 
 			// Process the audio chunk with the correct session ID
 			log.Printf("Processing audio for session %s (%d bytes)", sessionID, len(audioData))
-			return aiBridge.ProcessAudioChunk(ctx, sessionID, audioData)
+			transcript, aiResponse, err := aiBridge.ProcessAudioChunk(ctx, sessionID, audioData)
+			if err != nil {
+				return "", "", err
+			}
+
+			// If we got an AI response from the LLM_Layer, return both transcript and response
+			if aiResponse != "" {
+				log.Printf("Using AI response from LLM_Layer: %s", aiResponse[:min(50, len(aiResponse))])
+			}
+
+			// Return both the transcript and AI response
+			return transcript, aiResponse, nil
 		},
 	)
 

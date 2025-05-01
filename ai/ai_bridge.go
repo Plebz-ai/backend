@@ -128,7 +128,7 @@ func (b *AIBridge) InitAvatarStream(sessionID string, avatarURL string) error {
 }
 
 // ProcessAudioChunk processes an audio chunk through the AI Layer
-func (b *AIBridge) ProcessAudioChunk(ctx context.Context, sessionID string, audioData []byte) (string, error) {
+func (b *AIBridge) ProcessAudioChunk(ctx context.Context, sessionID string, audioData []byte) (string, string, error) {
 	// Check if session exists
 	b.contextMutex.Lock()
 	sessionContext, exists := b.sessionContexts[sessionID]
@@ -149,16 +149,17 @@ func (b *AIBridge) ProcessAudioChunk(ctx context.Context, sessionID string, audi
 
 	log.Printf("Processing audio chunk for session %s, audio size: %d bytes", sessionID, len(audioData))
 
-	transcript, err := b.TranscribeAudio(ctx, audioData)
+	// Call TranscribeAudio which now returns both transcript and AI response
+	transcript, aiResponse, err := b.TranscribeAudio(ctx, sessionID, audioData)
 	if err != nil {
-		return "", fmt.Errorf("failed to transcribe audio: %v", err)
+		return "", "", fmt.Errorf("failed to process audio: %v", err)
 	}
 
-	return transcript, nil
+	return transcript, aiResponse, nil
 }
 
 // Updated TranscribeAudio to use the new AI Layer endpoints
-func (b *AIBridge) TranscribeAudio(ctx context.Context, audioData []byte) (string, error) {
+func (b *AIBridge) TranscribeAudio(ctx context.Context, sessionID string, audioData []byte) (string, string, error) {
 	url := fmt.Sprintf("%s/process_audio", b.aiLayerURL)
 
 	// Create a new request
@@ -166,41 +167,68 @@ func (b *AIBridge) TranscribeAudio(ctx context.Context, audioData []byte) (strin
 	writer := multipart.NewWriter(body)
 	part, err := writer.CreateFormFile("audio", "audio.wav")
 	if err != nil {
-		return "", fmt.Errorf("failed to create form file: %v", err)
+		return "", "", fmt.Errorf("failed to create form file: %v", err)
 	}
 	if _, err := part.Write(audioData); err != nil {
-		return "", fmt.Errorf("failed to write audio data: %v", err)
+		return "", "", fmt.Errorf("failed to write audio data: %v", err)
 	}
+
+	// Add session and character ID as form fields if available
+	b.contextMutex.Lock()
+	sessionContext, exists := b.sessionContexts[sessionID]
+	b.contextMutex.Unlock()
+
+	if exists {
+		writer.WriteField("session_id", sessionID)
+		writer.WriteField("character_id", fmt.Sprintf("%d", sessionContext.CharacterID))
+	}
+
 	writer.Close()
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, body)
 	if err != nil {
-		return "", fmt.Errorf("failed to create request: %v", err)
+		return "", "", fmt.Errorf("failed to create request: %v", err)
 	}
+
+	// Add session and character ID as headers too for redundancy
+	if exists {
+		req.Header.Set("X-Session-ID", sessionID)
+		req.Header.Set("X-Character-ID", fmt.Sprintf("%d", sessionContext.CharacterID))
+	}
+
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
 	resp, err := b.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("failed to send request: %v", err)
+		return "", "", fmt.Errorf("failed to send request: %v", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("transcription service returned status %d: %s", resp.StatusCode, string(respBody))
+		return "", "", fmt.Errorf("transcription service returned status %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	var result map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("failed to decode response: %v", err)
+		return "", "", fmt.Errorf("failed to decode response: %v", err)
 	}
 
 	transcript, ok := result["transcript"].(string)
 	if !ok {
-		return "", fmt.Errorf("transcription service response missing 'transcript' field")
+		return "", "", fmt.Errorf("transcription service response missing 'transcript' field")
 	}
 
-	return transcript, nil
+	// Get AI response from the response field
+	aiResponse, ok := result["response"].(string)
+	if !ok {
+		log.Printf("Warning: AI Layer response missing 'response' field, will fall back to internal AI service")
+		aiResponse = ""
+	} else {
+		log.Printf("Received AI response from AI Layer: %s", aiResponse[:min(50, len(aiResponse))])
+	}
+
+	return transcript, aiResponse, nil
 }
 
 // ProcessTranscript processes a transcript through the backend AI service
@@ -434,7 +462,7 @@ func (b *AIBridge) SetupAPIHandlers(mux *http.ServeMux) {
 			return
 		}
 
-		transcript, err := b.ProcessAudioChunk(r.Context(), requestBody.SessionID, audioBytes)
+		transcript, aiResponse, err := b.ProcessAudioChunk(r.Context(), requestBody.SessionID, audioBytes)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -449,6 +477,7 @@ func (b *AIBridge) SetupAPIHandlers(mux *http.ServeMux) {
 		// Return response
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"transcript":   transcript,
+			"aiResponse":   aiResponse,
 			"textResponse": textResponse,
 			"audioData":    base64.StdEncoding.EncodeToString(audioData),
 		})
@@ -496,4 +525,12 @@ func (b *AIBridge) SetupAPIHandlers(mux *http.ServeMux) {
 			"status": "success",
 		})
 	})
+}
+
+// Helper function to avoid panic with string substring
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
