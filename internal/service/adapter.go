@@ -48,14 +48,14 @@ func (a *CharacterServiceAdapter) GetCharacter(id uint) (*ws.Character, error) {
 type AIServiceAdapter struct {
 	generateResponseFn func(character *ws.Character, userMessage string, history []ws.ChatMessage) (string, error)
 	textToSpeechFn     func(ctx context.Context, text string, voiceType string) ([]byte, error)
-	speechToTextFn     func(ctx context.Context, sessionID string, audioData []byte) (string, error)
+	speechToTextFn     func(ctx context.Context, sessionID string, audioData []byte) (string, string, error)
 }
 
 // NewAIServiceAdapter creates a new adapter for an AI service
 func NewAIServiceAdapter(
 	generateResponseFn func(character *ws.Character, userMessage string, history []ws.ChatMessage) (string, error),
 	textToSpeechFn func(ctx context.Context, text string, voiceType string) ([]byte, error),
-	speechToTextFn func(ctx context.Context, sessionID string, audioData []byte) (string, error),
+	speechToTextFn func(ctx context.Context, sessionID string, audioData []byte) (string, string, error),
 ) *AIServiceAdapter {
 	return &AIServiceAdapter{
 		generateResponseFn: generateResponseFn,
@@ -75,7 +75,7 @@ func (a *AIServiceAdapter) TextToSpeech(ctx context.Context, text string, voiceT
 }
 
 // SpeechToText implements the ws.AIService interface
-func (a *AIServiceAdapter) SpeechToText(ctx context.Context, sessionID string, audioData []byte) (string, error) {
+func (a *AIServiceAdapter) SpeechToText(ctx context.Context, sessionID string, audioData []byte) (string, string, error) {
 	return a.speechToTextFn(ctx, sessionID, audioData)
 }
 
@@ -267,17 +267,33 @@ func (s *AdapterService) ProcessAudioChunk(ctx context.Context, chunkID string) 
 	sessionInfo.LastActive = time.Now()
 
 	// Process through AI bridge
-	transcript, err := s.aiBridge.ProcessAudioChunk(ctx, chunk.SessionID, chunk.AudioData)
+	transcript, aiResponse, err := s.aiBridge.ProcessAudioChunk(ctx, chunk.SessionID, chunk.AudioData)
 	if err != nil {
 		s.audioService.UpdateProcessingStatus(chunkID, "failed")
 		return "", nil, fmt.Errorf("speech-to-text processing failed: %v", err)
 	}
 
-	// Generate response
-	textResponse, audioResponse, err := s.aiBridge.ProcessTranscript(ctx, chunk.SessionID, transcript)
-	if err != nil {
-		s.audioService.UpdateProcessingStatus(chunkID, "failed")
-		return "", nil, fmt.Errorf("response generation failed: %v", err)
+	// If we got an AI response from the LLM_Layer, use it
+	var textResponse string
+	var audioResponse []byte
+
+	if aiResponse != "" {
+		// Use the AI response from LLM_Layer
+		log.Printf("Using AI response from LLM_Layer for session %s", chunk.SessionID)
+		textResponse = aiResponse
+
+		// Generate TTS for the AI response
+		audioResponse, err = s.aiBridge.TextToSpeech(ctx, aiResponse, "default")
+		if err != nil {
+			log.Printf("Warning: Failed to generate speech for AI response: %v", err)
+		}
+	} else {
+		// Fall back to generating response with the internal AI service
+		textResponse, audioResponse, err = s.aiBridge.ProcessTranscript(ctx, chunk.SessionID, transcript)
+		if err != nil {
+			s.audioService.UpdateProcessingStatus(chunkID, "failed")
+			return "", nil, fmt.Errorf("response generation failed: %v", err)
+		}
 	}
 
 	// Update status to completed
@@ -366,15 +382,31 @@ func (s *AdapterService) ProcessAudioData(ctx context.Context, sessionID string,
 	sessionInfo.LastActive = time.Now()
 
 	// Process through AI bridge
-	transcript, err := s.aiBridge.ProcessAudioChunk(ctx, sessionID, audioData)
+	transcript, aiResponse, err := s.aiBridge.ProcessAudioChunk(ctx, sessionID, audioData)
 	if err != nil {
 		return "", nil, fmt.Errorf("speech-to-text processing failed: %v", err)
 	}
 
-	// Generate response
-	textResponse, audioResponse, err := s.aiBridge.ProcessTranscript(ctx, sessionID, transcript)
-	if err != nil {
-		return "", nil, fmt.Errorf("response generation failed: %v", err)
+	// If we got an AI response from the LLM_Layer, use it
+	var textResponse string
+	var audioResponse []byte
+
+	if aiResponse != "" {
+		// Use the AI response from LLM_Layer
+		log.Printf("Using AI response from LLM_Layer for session %s", sessionID)
+		textResponse = aiResponse
+
+		// Generate TTS for the AI response
+		audioResponse, err = s.aiBridge.TextToSpeech(ctx, aiResponse, "default")
+		if err != nil {
+			log.Printf("Warning: Failed to generate speech for AI response: %v", err)
+		}
+	} else {
+		// Fall back to generating response with the internal AI service
+		textResponse, audioResponse, err = s.aiBridge.ProcessTranscript(ctx, sessionID, transcript)
+		if err != nil {
+			return "", nil, fmt.Errorf("response generation failed: %v", err)
+		}
 	}
 
 	return textResponse, audioResponse, nil

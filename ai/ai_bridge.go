@@ -1,6 +1,7 @@
 package ai
 
 import (
+	"ai-agent-character-demo/backend/pkg/ws"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -53,9 +54,9 @@ type CreateStreamResponse struct {
 
 // NewAIBridge creates a new instance of the AIBridge
 func NewAIBridge() (*AIBridge, error) {
-	aiLayerURL := os.Getenv("AI_LAYER_URL")
+	aiLayerURL := os.Getenv("AI_SERVICE_URL")
 	if aiLayerURL == "" {
-		aiLayerURL = "http://localhost:8000"
+		aiLayerURL = "http://localhost:5000"
 	}
 
 	openAIService, err := NewAIService()
@@ -128,7 +129,7 @@ func (b *AIBridge) InitAvatarStream(sessionID string, avatarURL string) error {
 }
 
 // ProcessAudioChunk processes an audio chunk through the AI Layer
-func (b *AIBridge) ProcessAudioChunk(ctx context.Context, sessionID string, audioData []byte) (string, error) {
+func (b *AIBridge) ProcessAudioChunk(ctx context.Context, sessionID string, audioData []byte) (string, string, error) {
 	// Check if session exists
 	b.contextMutex.Lock()
 	sessionContext, exists := b.sessionContexts[sessionID]
@@ -149,16 +150,17 @@ func (b *AIBridge) ProcessAudioChunk(ctx context.Context, sessionID string, audi
 
 	log.Printf("Processing audio chunk for session %s, audio size: %d bytes", sessionID, len(audioData))
 
-	transcript, err := b.TranscribeAudio(ctx, audioData)
+	// Call TranscribeAudio which now returns both transcript and AI response
+	transcript, aiResponse, err := b.TranscribeAudio(ctx, sessionID, audioData)
 	if err != nil {
-		return "", fmt.Errorf("failed to transcribe audio: %v", err)
+		return "", "", fmt.Errorf("failed to process audio: %v", err)
 	}
 
-	return transcript, nil
+	return transcript, aiResponse, nil
 }
 
 // Updated TranscribeAudio to use the new AI Layer endpoints
-func (b *AIBridge) TranscribeAudio(ctx context.Context, audioData []byte) (string, error) {
+func (b *AIBridge) TranscribeAudio(ctx context.Context, sessionID string, audioData []byte) (string, string, error) {
 	url := fmt.Sprintf("%s/process_audio", b.aiLayerURL)
 
 	// Create a new request
@@ -166,41 +168,68 @@ func (b *AIBridge) TranscribeAudio(ctx context.Context, audioData []byte) (strin
 	writer := multipart.NewWriter(body)
 	part, err := writer.CreateFormFile("audio", "audio.wav")
 	if err != nil {
-		return "", fmt.Errorf("failed to create form file: %v", err)
+		return "", "", fmt.Errorf("failed to create form file: %v", err)
 	}
 	if _, err := part.Write(audioData); err != nil {
-		return "", fmt.Errorf("failed to write audio data: %v", err)
+		return "", "", fmt.Errorf("failed to write audio data: %v", err)
 	}
+
+	// Add session and character ID as form fields if available
+	b.contextMutex.Lock()
+	sessionContext, exists := b.sessionContexts[sessionID]
+	b.contextMutex.Unlock()
+
+	if exists {
+		writer.WriteField("session_id", sessionID)
+		writer.WriteField("character_id", fmt.Sprintf("%d", sessionContext.CharacterID))
+	}
+
 	writer.Close()
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, body)
 	if err != nil {
-		return "", fmt.Errorf("failed to create request: %v", err)
+		return "", "", fmt.Errorf("failed to create request: %v", err)
 	}
+
+	// Add session and character ID as headers too for redundancy
+	if exists {
+		req.Header.Set("X-Session-ID", sessionID)
+		req.Header.Set("X-Character-ID", fmt.Sprintf("%d", sessionContext.CharacterID))
+	}
+
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
 	resp, err := b.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("failed to send request: %v", err)
+		return "", "", fmt.Errorf("failed to send request: %v", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("transcription service returned status %d: %s", resp.StatusCode, string(respBody))
+		return "", "", fmt.Errorf("transcription service returned status %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	var result map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("failed to decode response: %v", err)
+		return "", "", fmt.Errorf("failed to decode response: %v", err)
 	}
 
 	transcript, ok := result["transcript"].(string)
 	if !ok {
-		return "", fmt.Errorf("transcription service response missing 'transcript' field")
+		return "", "", fmt.Errorf("transcription service response missing 'transcript' field")
 	}
 
-	return transcript, nil
+	// Get AI response from the response field
+	aiResponse, ok := result["response"].(string)
+	if !ok {
+		log.Printf("Warning: AI Layer response missing 'response' field, will fall back to internal AI service")
+		aiResponse = ""
+	} else {
+		log.Printf("Received AI response from AI Layer: %s", aiResponse[:min(50, len(aiResponse))])
+	}
+
+	return transcript, aiResponse, nil
 }
 
 // ProcessTranscript processes a transcript through the backend AI service
@@ -323,7 +352,7 @@ func (b *AIBridge) SendResponseToFrontend(sessionID string, textResponse string,
 	return nil
 }
 
-// getOrCreateWSConnection gets an existing WebSocket connection or creates a new one
+// Enhance error handling and retry logic in getOrCreateWSConnection
 func (b *AIBridge) getOrCreateWSConnection(sessionID string) (*websocket.Conn, error) {
 	b.connMutex.Lock()
 	defer b.connMutex.Unlock()
@@ -333,34 +362,42 @@ func (b *AIBridge) getOrCreateWSConnection(sessionID string) (*websocket.Conn, e
 		return conn, nil
 	}
 
-	// Create a new WebSocket connection
-	wsURL := fmt.Sprintf("ws://%s/ws/asr", b.aiLayerURL[7:]) // Remove http:// and replace with ws://
-	log.Printf("Attempting to connect to WebSocket at: %s", wsURL)
+	const maxRetries = 3
+	var lastErr error
 
-	// Test if the HTTP endpoint is accessible first
-	httpURL := fmt.Sprintf("%s/healthz", b.aiLayerURL)
-	httpResp, err := http.Get(httpURL)
-	if err != nil {
-		log.Printf("Warning: Health check failed: %v", err)
-	} else {
-		log.Printf("Health check status: %d", httpResp.StatusCode)
-		httpResp.Body.Close()
-	}
-
-	dialer := websocket.DefaultDialer
-	dialer.HandshakeTimeout = 10 * time.Second
-
-	conn, wsResp, err := dialer.Dial(wsURL, nil)
-	if err != nil {
-		if wsResp != nil {
-			log.Printf("WebSocket connection failed with status: %d", wsResp.StatusCode)
+	for i := 0; i < maxRetries; i++ {
+		// Perform health check
+		httpURL := fmt.Sprintf("%s/healthz", b.aiLayerURL)
+		httpResp, err := http.Get(httpURL)
+		if err != nil {
+			log.Printf("Health check failed (attempt %d/%d): %v", i+1, maxRetries, err)
+			lastErr = err
+			continue
 		}
-		return nil, fmt.Errorf("failed to connect to AI Layer WebSocket: %v", err)
+		httpResp.Body.Close()
+		if httpResp.StatusCode != http.StatusOK {
+			log.Printf("Health check returned status %d (attempt %d/%d)", httpResp.StatusCode, i+1, maxRetries)
+			lastErr = fmt.Errorf("health check failed with status %d", httpResp.StatusCode)
+			continue
+		}
+
+		// Attempt WebSocket connection
+		wsURL := fmt.Sprintf("ws://%s/ws/asr", b.aiLayerURL[7:])
+		log.Printf("Attempting to connect to WebSocket at: %s (attempt %d/%d)", wsURL, i+1, maxRetries)
+		conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+		if err != nil {
+			log.Printf("WebSocket connection failed (attempt %d/%d): %v", i+1, maxRetries, err)
+			lastErr = err
+			continue
+		}
+
+		b.wsConnections[sessionID] = conn
+		log.Printf("Successfully connected to WebSocket at: %s", wsURL)
+		return conn, nil
 	}
 
-	b.wsConnections[sessionID] = conn
-	log.Printf("Successfully connected to WebSocket at: %s", wsURL)
-	return conn, nil
+	log.Printf("Failed to establish WebSocket connection after %d attempts: %v", maxRetries, lastErr)
+	return nil, fmt.Errorf("failed to establish WebSocket connection after %d attempts: %v", maxRetries, lastErr)
 }
 
 // CleanupSession removes a session and its WebSocket connection
@@ -434,7 +471,7 @@ func (b *AIBridge) SetupAPIHandlers(mux *http.ServeMux) {
 			return
 		}
 
-		transcript, err := b.ProcessAudioChunk(r.Context(), requestBody.SessionID, audioBytes)
+		transcript, aiResponse, err := b.ProcessAudioChunk(r.Context(), requestBody.SessionID, audioBytes)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -449,6 +486,7 @@ func (b *AIBridge) SetupAPIHandlers(mux *http.ServeMux) {
 		// Return response
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"transcript":   transcript,
+			"aiResponse":   aiResponse,
 			"textResponse": textResponse,
 			"audioData":    base64.StdEncoding.EncodeToString(audioData),
 		})
@@ -497,3 +535,44 @@ func (b *AIBridge) SetupAPIHandlers(mux *http.ServeMux) {
 		})
 	})
 }
+
+// GenerateTextResponse generates a text response for a character based on a user message and conversation history
+func (b *AIBridge) GenerateTextResponse(character interface{}, userMessage string, history interface{}) (string, error) {
+	// Convert the generic interfaces to our internal types
+	char, ok := character.(*ws.Character)
+	if !ok {
+		return "", fmt.Errorf("invalid character type")
+	}
+
+	// Convert to internal Character type
+	internalChar := &Character{
+		ID:          char.ID,
+		Name:        char.Name,
+		Description: char.Description,
+		Personality: char.Personality,
+		VoiceType:   char.VoiceType,
+	}
+
+	// Convert history if provided
+	var messages []Message
+	if history != nil {
+		chatHistory, ok := history.([]ws.ChatMessage)
+		if !ok {
+			return "", fmt.Errorf("invalid chat history type")
+		}
+
+		for _, msg := range chatHistory {
+			messages = append(messages, Message{
+				ID:        msg.ID,
+				Sender:    msg.Sender,
+				Content:   msg.Content,
+				Timestamp: msg.Timestamp,
+			})
+		}
+	}
+
+	// Use the existing GenerateResponse method with our converted types
+	return b.openAIService.GenerateResponse(internalChar, userMessage, messages)
+}
+
+// Helper function to avoid panic with string substring is defined in ai_service.go

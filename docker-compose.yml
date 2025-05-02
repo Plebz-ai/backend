@@ -7,7 +7,7 @@ services:
       dockerfile: Dockerfile
     container_name: ai-character-demo-backend
     ports:
-      - "8082:8081" # Changed host port to 8082 to avoid conflict
+      - "8082:8081" 
     environment:
       - PORT=8081
       - ENV=production
@@ -21,6 +21,7 @@ services:
       - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
       - JWT_SECRET=${JWT_SECRET}
       - AI_LAYER_URL=http://transcription_service:5000
+      - REDIS_URL=redis://redis:6380
     depends_on:
       db:
         condition: service_healthy
@@ -54,6 +55,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
     networks:
+      - ai-character-network
       - default
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
@@ -64,9 +66,10 @@ services:
   redis:
     image: redis:latest
     ports:
-      - "6379:6379"
+      - "6380:6379"
     networks:
       - ai-character-network
+      - default
 
 volumes:
   postgres_data:
