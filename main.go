@@ -4,6 +4,8 @@ import (
 	"ai-agent-character-demo/backend/ai"
 	"ai-agent-character-demo/backend/internal/models"
 	"ai-agent-character-demo/backend/internal/service"
+	"ai-agent-character-demo/backend/internal/ws"
+	"ai-agent-character-demo/backend/pkg/logger"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -16,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -53,20 +56,69 @@ func main() {
 		log.Fatalf("Failed to create AIBridge: %v", err)
 	}
 
-	// Create a new HTTP server
-	mux := http.NewServeMux()
+	// Set up logging
+	logConfig := logger.DefaultConfig()
+	logger := logger.New(logConfig)
 
-	// Set up the API handlers
+	// Initialize Gin router
+	ginEngine := gin.New()
+	ginEngine.Use(gin.Recovery())
+	ginEngine.Use(func(c *gin.Context) {
+		start := time.Now()
+		path := c.Request.URL.Path
+		
+		c.Next()
+		
+		latency := time.Since(start)
+		statusCode := c.Writer.Status()
+		
+		logger.Info(fmt.Sprintf("[%d] %s %s - %v", 
+			statusCode, 
+			c.Request.Method,
+			path,
+			latency,
+		))
+	})
+
+	// Initialize WebSocket hub with adapters
+	characterServiceAdapter := service.NewCharacterServiceAdapter(characterService)
+	messageServiceAdapter := service.NewMessageServiceAdapter(service.NewMessageService(db))
+	aiServiceAdapter := createAIServiceAdapter(bridge)
+
+	// Create WebSocket hub
+	hub := ws.NewHub(
+		characterServiceAdapter,
+		aiServiceAdapter,
+		messageServiceAdapter,
+	)
+
+	// Set audio service in the hub for automatic audio storage
+	hub.SetAudioService(audioService)
+
+	// Start the hub
+	go hub.Run()
+
+	// Set up WebSocket route
+	ginEngine.GET("/ws", func(c *gin.Context) {
+		ws.ServeWs(hub, c)
+	})
+
+	// Create standard HTTP ServeMux for the AIBridge
+	mux := http.NewServeMux()
 	bridge.SetupAPIHandlers(mux)
+
+	// Create a handler that combines the Gin engine and ServeMux
+	combinedHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// If the path starts with /api/, use the Gin engine
+		if r.URL.Path == "/ws" {
+			ginEngine.ServeHTTP(w, r)
+		} else {
+			mux.ServeHTTP(w, r)
+		}
+	})
 
 	// Set up basic routes for audio processing
 	setupBasicRoutes(mux, audioService, adapterService)
-
-	// Add additional handlers for your existing API
-	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
-	})
 
 	// Get the port from the environment
 	port := os.Getenv("PORT")
@@ -77,7 +129,7 @@ func main() {
 	// Create the server
 	server := &http.Server{
 		Addr:    ":" + port,
-		Handler: mux,
+		Handler: combinedHandler,
 	}
 
 	// Start the server in a goroutine
@@ -106,6 +158,53 @@ func main() {
 	}
 
 	log.Println("Server shutdown complete")
+}
+
+// Helper function to create AIServiceAdapter
+func createAIServiceAdapter(bridge *ai.AIBridge) *service.AIServiceAdapter {
+	return service.NewAIServiceAdapter(
+		// GenerateResponse adapter
+		func(character *ws.Character, userMessage string, history []ws.ChatMessage) (string, error) {
+			// Convert to the right type
+			pkgCharacter := &ai.Character{
+				ID:          character.ID,
+				Name:        character.Name,
+				Description: character.Description,
+				Personality: character.Personality,
+				VoiceType:   character.VoiceType,
+			}
+
+			var pkgHistory []struct {
+				ID        string
+				Content   string
+				Sender    string
+				Timestamp time.Time
+			}
+			for _, msg := range history {
+				pkgHistory = append(pkgHistory, struct {
+					ID        string
+					Content   string
+					Sender    string
+					Timestamp time.Time
+				}{
+					ID:        msg.ID,
+					Content:   msg.Content,
+					Sender:    msg.Sender,
+					Timestamp: msg.Timestamp,
+				})
+			}
+
+			return bridge.GenerateTextResponse(pkgCharacter, userMessage, pkgHistory)
+		},
+		// TextToSpeech adapter
+		func(ctx context.Context, text string, voiceType string) ([]byte, error) {
+			return bridge.TextToSpeech(ctx, text, voiceType)
+		},
+		// SpeechToText adapter
+		func(ctx context.Context, sessionID string, audioData []byte) (string, string, error) {
+			return bridge.ProcessAudioChunk(ctx, sessionID, audioData)
+		},
+	)
 }
 
 // setupBasicRoutes sets up the basic API routes without requiring a full controller

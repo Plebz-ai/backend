@@ -30,8 +30,10 @@ const (
 )
 
 var upgrader = websocket.Upgrader{
+	// Restrict CheckOrigin to allow only trusted origins
 	CheckOrigin: func(r *http.Request) bool {
-		return true // Allow all origins in development
+		origin := r.Header.Get("Origin")
+		return origin == "http://localhost:3000" || origin == "https://your-production-domain.com"
 	},
 	HandshakeTimeout: 10 * time.Second,
 	ReadBufferSize:   1024,
@@ -174,11 +176,12 @@ func (h *Hub) Run() {
 	}
 }
 
+// Improve error logging and cleanup in ReadPump
 func (c *Client) ReadPump() {
 	defer func() {
 		c.Hub.unregister <- c
 		c.Conn.Close()
-		log.Printf("ReadPump ended for client: %s", c.ID)
+		log.Printf("ReadPump ended for client: %s, session: %s", c.ID, c.SessionID)
 	}()
 
 	c.Conn.SetReadLimit(maxMessageSize)
@@ -192,21 +195,21 @@ func (c *Client) ReadPump() {
 		_, messageData, err := c.Conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("error: %v", err)
+				log.Printf("Unexpected WebSocket close error for client %s, session %s: %v", c.ID, c.SessionID, err)
 			}
 			break
 		}
 
-		var message Message
-		if err := json.Unmarshal(messageData, &message); err != nil {
+		// Parse the message data into a Message struct
+		var msg Message
+		if err := json.Unmarshal(messageData, &msg); err != nil {
 			log.Printf("Error unmarshaling message: %v", err)
 			c.sendErrorMessage("Invalid message format")
 			continue
 		}
 
-		// Handle message in a separate goroutine to avoid blocking the read pump
-		// This allows the client to continue reading messages while processing
-		go c.handleMessage(message)
+		// Handle message in a separate goroutine
+		go c.handleMessage(msg)
 	}
 }
 
@@ -237,8 +240,10 @@ func (c *Client) handleMessage(message Message) {
 	}
 }
 
+// Add detailed logging for WebSocket message handling
 func (c *Client) handleChatMessage(message Message) {
-	// Extract the user message content
+	log.Printf("Received chat message: %+v", message)
+
 	var chatContent struct {
 		ID        string `json:"id"`
 		Sender    string `json:"sender"`
@@ -259,25 +264,24 @@ func (c *Client) handleChatMessage(message Message) {
 		return
 	}
 
-	// Ensure this is a user message
+	log.Printf("Chat content unmarshaled successfully: %+v", chatContent)
+
 	if chatContent.Sender != "user" {
-		log.Printf("Received non-user message with sender: %s", chatContent.Sender)
+		log.Printf("Invalid sender: %s", chatContent.Sender)
 		c.sendErrorMessage("Only user messages can be sent")
 		return
 	}
 
-	// Validate content
 	if chatContent.Content == "" {
+		log.Printf("Empty message content")
 		c.sendErrorMessage("Message content cannot be empty")
 		return
 	}
 
-	// Generate message ID if not provided
 	if chatContent.ID == "" {
 		chatContent.ID = fmt.Sprintf("msg-%d", time.Now().UnixNano())
 	}
 
-	// Store the user message in conversation history
 	userMessage := ChatMessage{
 		ID:        chatContent.ID,
 		Sender:    "user",
@@ -285,114 +289,57 @@ func (c *Client) handleChatMessage(message Message) {
 		Timestamp: time.Now(),
 	}
 
-	// Acknowledge receipt of message
+	log.Printf("Storing user message: %+v", userMessage)
+
+	c.messagesMu.Lock()
+	c.messages = append(c.messages, userMessage)
+	messages := c.messages
+	c.messagesMu.Unlock()
+
+	if c.SessionID != "" {
+		err := c.Hub.messageService.SaveMessage(c.CharID, c.SessionID, &userMessage)
+		if err != nil {
+			log.Printf("Error saving message to database: %v", err)
+		}
+	}
+
 	c.sendMessage("ack", map[string]string{
 		"messageId": userMessage.ID,
 		"status":    "received",
 	})
 
-	c.messagesMu.Lock()
-	c.messages = append(c.messages, userMessage)
-	messages := c.messages // Copy for AI generation
-	c.messagesMu.Unlock()
-
-	// Save the message to persistent storage
-	if c.SessionID != "" {
-		err := c.Hub.messageService.SaveMessage(c.CharID, c.SessionID, &userMessage)
-		if err != nil {
-			log.Printf("Error saving message to database: %v", err)
-			// Continue processing even if save fails
-		}
-	}
-
-	// Notify client that character is typing
-	c.sendMessage("typing", map[string]interface{}{
-		"is_typing": true,
-	})
-
-	// Fetch character data
-	character, err := c.Hub.characterService.GetCharacter(c.CharID)
-	if err != nil {
-		log.Printf("Error fetching character: %v", err)
-		c.sendErrorMessage("Failed to fetch character information")
-		return
-	}
-
-	// Generate AI response with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	// Use a channel to handle the AI response with timeout
-	type responseResult struct {
-		response string
-		err      error
-	}
-	resultChan := make(chan responseResult, 1)
+	log.Printf("Acknowledged user message: %s", userMessage.ID)
 
 	go func() {
-		resp, err := c.Hub.aiService.GenerateResponse(character, chatContent.Content, messages)
-		resultChan <- responseResult{response: resp, err: err}
-	}()
+		// Get character first
+		character, err := c.Hub.characterService.GetCharacter(c.CharID)
+		if err != nil {
+			log.Printf("Error fetching character: %v", err)
+			c.sendErrorMessage("Failed to fetch character information")
+			return
+		}
 
-	// Wait for response or timeout
-	var aiResponse string
-	select {
-	case <-ctx.Done():
-		log.Printf("AI response generation timed out for client %s", c.ID)
-		c.sendErrorMessage("Response generation timed out")
-		return
-	case result := <-resultChan:
-		if result.err != nil {
-			log.Printf("Error generating AI response: %v", result.err)
+		aiResponse, err := c.Hub.aiService.GenerateResponse(character, chatContent.Content, messages)
+		if err != nil {
+			log.Printf("Error generating AI response: %v", err)
 			c.sendErrorMessage("Failed to generate response from the AI character")
 			return
 		}
-		aiResponse = result.response
-	}
 
-	// Create the character's response message
-	characterMessage := ChatMessage{
-		ID:        fmt.Sprintf("resp-%d", time.Now().UnixNano()),
-		Sender:    "character",
-		Content:   aiResponse,
-		Timestamp: time.Now(),
-	}
+		log.Printf("Generated AI response: %s", aiResponse)
 
-	// Store the character message in conversation history
-	c.messagesMu.Lock()
-	c.messages = append(c.messages, characterMessage)
-	c.messagesMu.Unlock()
-
-	// Save the character's response to persistent storage
-	if c.SessionID != "" {
-		err := c.Hub.messageService.SaveMessage(c.CharID, c.SessionID, &characterMessage)
-		if err != nil {
-			log.Printf("Error saving character message to database: %v", err)
-			// Continue even if save fails
-		}
-	}
-
-	// Send the character's response
-	c.sendMessage("chat", characterMessage)
-
-	// Generate speech asynchronously if configured
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		audioData, err := c.Hub.aiService.TextToSpeech(ctx, aiResponse, character.VoiceType)
-		if err != nil {
-			log.Printf("Error generating speech: %v", err)
-			return
+		characterMessage := ChatMessage{
+			ID:        fmt.Sprintf("resp-%d", time.Now().UnixNano()),
+			Sender:    "character",
+			Content:   aiResponse,
+			Timestamp: time.Now(),
 		}
 
-		if audioData != nil {
-			// Send the audio data
-			c.sendMessage("audio", map[string]interface{}{
-				"data":      audioData,
-				"messageId": characterMessage.ID,
-			})
-		}
+		c.messagesMu.Lock()
+		c.messages = append(c.messages, characterMessage)
+		c.messagesMu.Unlock()
+
+		c.sendMessage("chat", characterMessage)
 	}()
 }
 
@@ -566,7 +513,7 @@ func (c *Client) handleAudioMessage(message Message) {
 	// Send the transcribed text back to the client
 	c.sendMessage("speech_text", map[string]interface{}{
 		"text": transcript,
-		"id":   userMessage.ID,
+		"id:":  userMessage.ID,
 	})
 
 	// Store the user message in conversation history
@@ -913,6 +860,7 @@ func (c *Client) WritePump() {
 	}
 }
 
+// Improve logging for WebSocket connections
 func ServeWs(hub *Hub, c *gin.Context) {
 	// Validate input parameters
 	charID := c.Query("characterId")
@@ -950,6 +898,8 @@ func ServeWs(hub *Hub, c *gin.Context) {
 		log.Printf("Error upgrading connection: %v", err)
 		return
 	}
+
+	log.Printf("WebSocket connection established: clientID=%s, characterID=%d", clientID, charIDUint)
 
 	// Enable compression
 	conn.EnableWriteCompression(true)

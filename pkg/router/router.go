@@ -100,7 +100,7 @@ func (r *Router) SetupRoutes() {
 	r.setupHealthRoutes()
 }
 
-// corsMiddleware creates a middleware function for CORS handling
+// Enhance CORS middleware to explicitly allow WebSocket-specific headers
 func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		origin := c.Request.Header.Get("Origin")
@@ -115,7 +115,8 @@ func corsMiddleware() gin.HandlerFunc {
 		}
 
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept, Accept-Encoding, X-CSRF-Token, Authorization, Origin")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept, Accept-Encoding, X-CSRF-Token, Authorization, Origin, Upgrade, Connection")
+		c.Writer.Header().Set("Access-Control-Expose-Headers", "Upgrade, Connection")
 		c.Writer.Header().Set("Access-Control-Max-Age", "86400")
 
 		if c.Request.Method == "OPTIONS" {

@@ -352,7 +352,7 @@ func (b *AIBridge) SendResponseToFrontend(sessionID string, textResponse string,
 	return nil
 }
 
-// getOrCreateWSConnection gets an existing WebSocket connection or creates a new one
+// Enhance error handling and retry logic in getOrCreateWSConnection
 func (b *AIBridge) getOrCreateWSConnection(sessionID string) (*websocket.Conn, error) {
 	b.connMutex.Lock()
 	defer b.connMutex.Unlock()
@@ -362,34 +362,42 @@ func (b *AIBridge) getOrCreateWSConnection(sessionID string) (*websocket.Conn, e
 		return conn, nil
 	}
 
-	// Create a new WebSocket connection
-	wsURL := fmt.Sprintf("ws://%s/ws/asr", b.aiLayerURL[7:]) // Remove http:// and replace with ws://
-	log.Printf("Attempting to connect to WebSocket at: %s", wsURL)
+	const maxRetries = 3
+	var lastErr error
 
-	// Test if the HTTP endpoint is accessible first
-	httpURL := fmt.Sprintf("%s/healthz", b.aiLayerURL)
-	httpResp, err := http.Get(httpURL)
-	if err != nil {
-		log.Printf("Warning: Health check failed: %v", err)
-	} else {
-		log.Printf("Health check status: %d", httpResp.StatusCode)
-		httpResp.Body.Close()
-	}
-
-	dialer := websocket.DefaultDialer
-	dialer.HandshakeTimeout = 10 * time.Second
-
-	conn, wsResp, err := dialer.Dial(wsURL, nil)
-	if err != nil {
-		if wsResp != nil {
-			log.Printf("WebSocket connection failed with status: %d", wsResp.StatusCode)
+	for i := 0; i < maxRetries; i++ {
+		// Perform health check
+		httpURL := fmt.Sprintf("%s/healthz", b.aiLayerURL)
+		httpResp, err := http.Get(httpURL)
+		if err != nil {
+			log.Printf("Health check failed (attempt %d/%d): %v", i+1, maxRetries, err)
+			lastErr = err
+			continue
 		}
-		return nil, fmt.Errorf("failed to connect to AI Layer WebSocket: %v", err)
+		httpResp.Body.Close()
+		if httpResp.StatusCode != http.StatusOK {
+			log.Printf("Health check returned status %d (attempt %d/%d)", httpResp.StatusCode, i+1, maxRetries)
+			lastErr = fmt.Errorf("health check failed with status %d", httpResp.StatusCode)
+			continue
+		}
+
+		// Attempt WebSocket connection
+		wsURL := fmt.Sprintf("ws://%s/ws/asr", b.aiLayerURL[7:])
+		log.Printf("Attempting to connect to WebSocket at: %s (attempt %d/%d)", wsURL, i+1, maxRetries)
+		conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+		if err != nil {
+			log.Printf("WebSocket connection failed (attempt %d/%d): %v", i+1, maxRetries, err)
+			lastErr = err
+			continue
+		}
+
+		b.wsConnections[sessionID] = conn
+		log.Printf("Successfully connected to WebSocket at: %s", wsURL)
+		return conn, nil
 	}
 
-	b.wsConnections[sessionID] = conn
-	log.Printf("Successfully connected to WebSocket at: %s", wsURL)
-	return conn, nil
+	log.Printf("Failed to establish WebSocket connection after %d attempts: %v", maxRetries, lastErr)
+	return nil, fmt.Errorf("failed to establish WebSocket connection after %d attempts: %v", maxRetries, lastErr)
 }
 
 // CleanupSession removes a session and its WebSocket connection
