@@ -3,8 +3,10 @@ package di
 import (
 	"ai-agent-character-demo/backend/ai"
 	"ai-agent-character-demo/backend/internal/service"
+	"ai-agent-character-demo/backend/internal/ws"
 	"ai-agent-character-demo/backend/pkg/jwt"
 	"ai-agent-character-demo/backend/pkg/logger"
+	pkgws "ai-agent-character-demo/backend/pkg/ws" // Aliased to avoid conflicts
 	"context"
 	"fmt"
 	"time"
@@ -84,13 +86,31 @@ func New(db *gorm.DB, config *Config) (*Container, error) {
 	// Initialize service adapters
 	characterServiceAdapter := service.NewCharacterServiceAdapter(characterService)
 	messageServiceAdapter := service.NewMessageServiceAdapter(messageService)
-
 	// Create AIServiceAdapter with function adapters
 	aiServiceAdapter := service.NewAIServiceAdapter(
 		// GenerateResponse adapter
-		func(character interface{}, userMessage string, history interface{}) (string, error) {
+		func(character *ws.Character, userMessage string, history []ws.ChatMessage) (string, error) {
+			// Convert from internal/ws to pkg/ws types if needed
+			pkgCharacter := &pkgws.Character{
+				ID:          character.ID,
+				Name:        character.Name,
+				Description: character.Description,
+				Personality: character.Personality,
+				VoiceType:   character.VoiceType,
+			}
+
+			var pkgHistory []pkgws.ChatMessage
+			for _, msg := range history {
+				pkgHistory = append(pkgHistory, pkgws.ChatMessage{
+					ID:        msg.ID,
+					Content:   msg.Content,
+					Sender:    msg.Sender,
+					Timestamp: msg.Timestamp,
+				})
+			}
+
 			// Use AI Bridge to generate response
-			return aiBridge.GenerateResponse(context.Background(), character.(*ai.Character), userMessage, history.([]ai.ChatMessage))
+			return aiBridge.GenerateTextResponse(pkgCharacter, userMessage, pkgHistory)
 		},
 		// TextToSpeech adapter
 		func(ctx context.Context, text string, voiceType string) ([]byte, error) {

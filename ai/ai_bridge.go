@@ -1,6 +1,7 @@
 package ai
 
 import (
+	"ai-agent-character-demo/backend/pkg/ws"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -527,10 +528,43 @@ func (b *AIBridge) SetupAPIHandlers(mux *http.ServeMux) {
 	})
 }
 
-// Helper function to avoid panic with string substring
-func min(a, b int) int {
-	if a < b {
-		return a
+// GenerateTextResponse generates a text response for a character based on a user message and conversation history
+func (b *AIBridge) GenerateTextResponse(character interface{}, userMessage string, history interface{}) (string, error) {
+	// Convert the generic interfaces to our internal types
+	char, ok := character.(*ws.Character)
+	if !ok {
+		return "", fmt.Errorf("invalid character type")
 	}
-	return b
+
+	// Convert to internal Character type
+	internalChar := &Character{
+		ID:          char.ID,
+		Name:        char.Name,
+		Description: char.Description,
+		Personality: char.Personality,
+		VoiceType:   char.VoiceType,
+	}
+
+	// Convert history if provided
+	var messages []Message
+	if history != nil {
+		chatHistory, ok := history.([]ws.ChatMessage)
+		if !ok {
+			return "", fmt.Errorf("invalid chat history type")
+		}
+
+		for _, msg := range chatHistory {
+			messages = append(messages, Message{
+				ID:        msg.ID,
+				Sender:    msg.Sender,
+				Content:   msg.Content,
+				Timestamp: msg.Timestamp,
+			})
+		}
+	}
+
+	// Use the existing GenerateResponse method with our converted types
+	return b.openAIService.GenerateResponse(internalChar, userMessage, messages)
 }
+
+// Helper function to avoid panic with string substring is defined in ai_service.go

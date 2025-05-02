@@ -333,10 +333,22 @@ func (s *AIService) getVoiceIDForType(voiceType string) string {
 }
 
 // fallbackTextToSpeech provides a basic TTS alternative when ElevenLabs is not available
-func (s *AIService) fallbackTextToSpeech(ctx context.Context, text string, voiceType string) ([]byte, error) {
+func (s *AIService) fallbackTextToSpeech(_ context.Context, text string, voiceType string) ([]byte, error) {
+	// Log the attempt with the parameters to show they're intentionally captured
+	log.Printf("Fallback TTS requested for text '%s...' with voice type '%s'",
+		text[:min(20, len(text))], voiceType)
+
 	// In a production app, implement an alternative TTS service here
-	// For simplicity, we're returning an error
+	// For now, we're returning an error but acknowledging the parameters
 	return nil, errors.New("text-to-speech unavailable: ElevenLabs API key not configured")
+}
+
+// Helper function to get minimum value - used for text truncation
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // SpeechToText converts audio to text
