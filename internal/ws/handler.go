@@ -93,6 +93,7 @@ type Character struct {
 	Description string    `json:"description"`
 	Personality string    `json:"personality"`
 	VoiceType   string    `json:"voice_type"`
+	AvatarURL   string    `json:"avatar_url"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
@@ -517,7 +518,7 @@ func (c *Client) handleAudioMessage(message Message) {
 
 	// IMPORTANT: Use the client's session ID for STT processing, not a random one
 	log.Printf("Using session ID %s for STT processing", c.SessionID)
-	
+
 	go func() {
 		text, err := c.Hub.aiService.SpeechToText(ctx, c.SessionID, audioData)
 		resultChan <- sttResult{text: text, err: err}

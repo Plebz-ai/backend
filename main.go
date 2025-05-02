@@ -110,6 +110,14 @@ func main() {
 
 // setupBasicRoutes sets up the basic API routes without requiring a full controller
 func setupBasicRoutes(mux *http.ServeMux, audioService *service.AudioService, adapterService *service.AdapterService) {
+	// Serve static files from uploads directory
+	uploadsDir := http.Dir("./uploads")
+	fileServer := http.FileServer(uploadsDir)
+	mux.Handle("/uploads/", http.StripPrefix("/uploads/", fileServer))
+
+	// Ensure uploads directory exists
+	os.MkdirAll("./uploads", 0755)
+
 	// Route to process an audio chunk
 	mux.HandleFunc("/api/audio/process", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
