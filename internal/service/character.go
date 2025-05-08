@@ -41,6 +41,7 @@ func (s *CharacterService) CreateCharacter(req *models.CreateCharacterRequest) (
 		Description: req.Description,
 		Personality: req.Personality,
 		VoiceType:   req.VoiceType,
+		AvatarURL:   req.AvatarURL,
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
 	}
@@ -75,6 +76,7 @@ func (s *CharacterService) GetWebSocketCharacter(id uint) (*ws.Character, error)
 		Description: character.Description,
 		Personality: character.Personality,
 		VoiceType:   character.VoiceType,
+		AvatarURL:   character.AvatarURL,
 		CreatedAt:   character.CreatedAt,
 		UpdatedAt:   character.UpdatedAt,
 	}, nil

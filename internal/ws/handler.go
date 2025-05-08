@@ -95,6 +95,7 @@ type Character struct {
 	Description string    `json:"description"`
 	Personality string    `json:"personality"`
 	VoiceType   string    `json:"voice_type"`
+	AvatarURL   string    `json:"avatar_url"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
