@@ -62,11 +62,11 @@ func New(db *gorm.DB, config *Config) (*Container, error) {
 	// Initialize the logger
 	log := logger.New(config.LoggerConfig)
 
-	// Initialize JWT service
+	// Initialize JWT service with config parameters
 	jwtService := jwt.NewService(config.JWTSecret, time.Duration(config.JWTExpiryHours)*time.Hour)
 
 	// Initialize core services
-	userService := service.NewUserService(db)
+	userService := service.NewUserService(db, jwtService)
 	characterService := service.NewCharacterService(db)
 	messageService := service.NewMessageService(db)
 	audioService := service.NewAudioServiceWithConfig(db, config.AudioServiceConfig)

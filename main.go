@@ -5,6 +5,7 @@ import (
 	"ai-agent-character-demo/backend/internal/models"
 	"ai-agent-character-demo/backend/internal/service"
 	"ai-agent-character-demo/backend/internal/ws"
+	"ai-agent-character-demo/backend/pkg/jwt"
 	"ai-agent-character-demo/backend/pkg/logger"
 	"context"
 	"encoding/base64"
@@ -36,9 +37,14 @@ func main() {
 		log.Fatalf("Failed to setup database: %v", err)
 	}
 
+	// Initialize JWT service
+	jwtSecret := os.Getenv("JWT_SECRET")
+	jwtExpiryHours := 24 * time.Hour // Default to 24 hours
+	jwtService := jwt.NewService(jwtSecret, jwtExpiryHours)
+
 	// Initialize services
 	audioService := service.NewAudioService(db)
-	userService := service.NewUserService(db)
+	userService := service.NewUserService(db, jwtService)
 	characterService := service.NewCharacterService(db)
 
 	// Initialize adapter service that connects to the AI layer
@@ -66,14 +72,14 @@ func main() {
 	ginEngine.Use(func(c *gin.Context) {
 		start := time.Now()
 		path := c.Request.URL.Path
-		
+
 		c.Next()
-		
+
 		latency := time.Since(start)
 		statusCode := c.Writer.Status()
-		
-		logger.Info(fmt.Sprintf("[%d] %s %s - %v", 
-			statusCode, 
+
+		logger.Info(fmt.Sprintf("[%d] %s %s - %v",
+			statusCode,
 			c.Request.Method,
 			path,
 			latency,

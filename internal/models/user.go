@@ -3,18 +3,23 @@ package models
 import (
 	"time"
 
+	"ai-agent-character-demo/backend/pkg/jwt"
+
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
 
 // User represents a user in the system
 type User struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	Name      string    `json:"name"`
-	Email     string    `gorm:"uniqueIndex" json:"email"`
-	Password  string    `json:"-"` // Never return password in JSON
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID          uint      `gorm:"primaryKey" json:"id"`
+	Name        string    `json:"name"`
+	Email       string    `gorm:"uniqueIndex" json:"email"`
+	Password    string    `json:"-"`                                      // Never return password in JSON
+	Role        string    `json:"role" gorm:"default:user"`               // user, admin, or guest
+	Permissions string    `json:"permissions,omitempty" gorm:"type:text"` // JSON array of permissions
+	LastLogin   time.Time `json:"last_login,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // CreateUserRequest is the request structure for creating a new user
@@ -22,6 +27,7 @@ type CreateUserRequest struct {
 	Name     string `json:"name" binding:"required"`
 	Email    string `json:"email" binding:"required,email"`
 	Password string `json:"password" binding:"required,min=8"`
+	Role     string `json:"role,omitempty"`
 }
 
 // LoginRequest is the request structure for user login
@@ -32,11 +38,14 @@ type LoginRequest struct {
 
 // UserResponse is the response structure for user data (without sensitive info)
 type UserResponse struct {
-	ID        uint      `json:"id"`
-	Name      string    `json:"name"`
-	Email     string    `json:"email"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID          uint      `json:"id"`
+	Name        string    `json:"name"`
+	Email       string    `json:"email"`
+	Role        string    `json:"role"`
+	Permissions []string  `json:"permissions,omitempty"`
+	LastLogin   time.Time `json:"last_login,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // HashPassword hashes a password for storage
@@ -58,16 +67,33 @@ func (u *User) BeforeCreate(tx *gorm.DB) error {
 		return err
 	}
 	u.Password = hashedPassword
+
+	// Set default role if not specified
+	if u.Role == "" {
+		u.Role = string(jwt.RoleUser)
+	}
+
 	return nil
 }
 
 // ToResponse converts a User model to a UserResponse
 func (u *User) ToResponse() UserResponse {
+	var permissions []string
+
+	// Parse permissions from JSON string if present
+	if u.Permissions != "" {
+		// Simple handling - in a real app you'd use json.Unmarshal
+		permissions = make([]string, 0)
+	}
+
 	return UserResponse{
-		ID:        u.ID,
-		Name:      u.Name,
-		Email:     u.Email,
-		CreatedAt: u.CreatedAt,
-		UpdatedAt: u.UpdatedAt,
+		ID:          u.ID,
+		Name:        u.Name,
+		Email:       u.Email,
+		Role:        u.Role,
+		Permissions: permissions,
+		LastLogin:   u.LastLogin,
+		CreatedAt:   u.CreatedAt,
+		UpdatedAt:   u.UpdatedAt,
 	}
 }

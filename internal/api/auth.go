@@ -1,43 +1,54 @@
 package api
 
 import (
-	"log"
+	"fmt"
 	"net/http"
-	"strings"
 
 	"ai-agent-character-demo/backend/internal/models"
 	"ai-agent-character-demo/backend/internal/service"
+	"ai-agent-character-demo/backend/pkg/errors"
 	"ai-agent-character-demo/backend/pkg/jwt"
+	"ai-agent-character-demo/backend/pkg/logger"
 
 	"github.com/gin-gonic/gin"
 )
 
 // AuthHandler handles authentication-related requests
 type AuthHandler struct {
-	service *service.UserService
+	service    *service.UserService
+	jwtService *jwt.Service
+	logger     *logger.Logger
 }
 
 // NewAuthHandler creates a new auth handler
-func NewAuthHandler(service *service.UserService) *AuthHandler {
-	return &AuthHandler{service: service}
+func NewAuthHandler(service *service.UserService, jwtService *jwt.Service, logger *logger.Logger) *AuthHandler {
+	return &AuthHandler{
+		service:    service,
+		jwtService: jwtService,
+		logger:     logger,
+	}
 }
 
 // Signup handles user registration
 func (h *AuthHandler) Signup(c *gin.Context) {
 	var req models.CreateUserRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		log.Printf("Error binding JSON: %v", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		h.logger.Warn("Error binding JSON for signup", "error", err.Error())
+		c.Error(errors.NewBadRequestError("INVALID_REQUEST", "Invalid request format"))
 		return
 	}
 
 	user, token, err := h.service.CreateUser(&req)
 	if err != nil {
-		status := http.StatusInternalServerError
-		if err == service.ErrUserAlreadyExists {
-			status = http.StatusConflict
+		switch err {
+		case service.ErrUserAlreadyExists:
+			c.Error(errors.NewConflictError("USER_EXISTS", "A user with this email already exists"))
+		case service.ErrInvalidRole:
+			c.Error(errors.NewBadRequestError("INVALID_ROLE", "The provided role is invalid"))
+		default:
+			h.logger.Error("Error creating user", "error", err.Error())
+			c.Error(errors.NewInternalServerError("SERVER_ERROR", "Failed to create user account"))
 		}
-		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -51,20 +62,28 @@ func (h *AuthHandler) Signup(c *gin.Context) {
 func (h *AuthHandler) Login(c *gin.Context) {
 	var req models.LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		log.Printf("Error binding JSON: %v", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		h.logger.Warn("Error binding JSON for login", "error", err.Error())
+		c.Error(errors.NewBadRequestError("INVALID_REQUEST", "Invalid request format"))
 		return
 	}
 
 	user, token, err := h.service.Login(&req)
 	if err != nil {
-		status := http.StatusInternalServerError
-		if err == service.ErrInvalidCredentials {
-			status = http.StatusUnauthorized
+		switch err {
+		case service.ErrInvalidCredentials:
+			c.Error(errors.NewUnauthorizedError("INVALID_CREDENTIALS", "Invalid email or password"))
+		default:
+			h.logger.Error("Error during login", "error", err.Error())
+			c.Error(errors.NewInternalServerError("SERVER_ERROR", "An error occurred during login"))
 		}
-		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
+
+	h.logger.Info("User logged in successfully",
+		"userID", user.ID,
+		"email", user.Email,
+		"role", user.Role,
+	)
 
 	c.JSON(http.StatusOK, gin.H{
 		"user":  user.ToResponse(),
@@ -74,64 +93,73 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 // Me returns the current authenticated user
 func (h *AuthHandler) Me(c *gin.Context) {
-	// Get user ID from context (set by AuthMiddleware)
+	// Get user ID from JWT claims
 	userID, exists := c.Get("userID")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		c.Error(errors.NewUnauthorizedError("UNAUTHORIZED", "Authentication required"))
 		return
 	}
 
 	user, err := h.service.GetUserByID(userID.(uint))
 	if err != nil {
-		status := http.StatusInternalServerError
-		if err == service.ErrUserNotFound {
-			status = http.StatusNotFound
+		switch err {
+		case service.ErrUserNotFound:
+			c.Error(errors.NewNotFoundError("USER_NOT_FOUND", "User not found"))
+		default:
+			h.logger.Error("Error getting user", "error", err.Error())
+			c.Error(errors.NewInternalServerError("SERVER_ERROR", "Failed to retrieve user"))
 		}
-		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
 
 	c.JSON(http.StatusOK, user.ToResponse())
 }
 
-// AuthMiddleware is a middleware to authenticate requests
-func AuthMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		// Get the Authorization header
-		authHeader := c.GetHeader("Authorization")
-		if authHeader == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "authorization header is required"})
-			c.Abort()
-			return
-		}
-
-		// Check if it's a Bearer token
-		tokenParts := strings.Split(authHeader, " ")
-		if len(tokenParts) != 2 || strings.ToLower(tokenParts[0]) != "bearer" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid authorization format, Bearer token required"})
-			c.Abort()
-			return
-		}
-
-		// Get the token
-		tokenString := tokenParts[1]
-		claims, err := jwt.ValidateToken(tokenString)
-		if err != nil {
-			status := http.StatusUnauthorized
-			if err == jwt.ErrExpiredToken {
-				status = http.StatusUnauthorized
-				c.JSON(status, gin.H{"error": "token has expired"})
-			} else {
-				c.JSON(status, gin.H{"error": "invalid token"})
-			}
-			c.Abort()
-			return
-		}
-
-		// Set user ID in context
-		c.Set("userID", claims.UserID)
-		c.Set("userEmail", claims.Email)
-
-		c.Next()
+// UpdateUserRole allows admins to update a user's role
+func (h *AuthHandler) UpdateUserRole(c *gin.Context) {
+	// Only admins can update roles
+	claims, exists := c.Get("claims")
+	if !exists || !claims.(*jwt.JWTClaims).HasRole(jwt.RoleAdmin) {
+		c.Error(errors.NewForbiddenError("FORBIDDEN", "Insufficient permissions"))
+		return
 	}
+
+	userID := c.Param("id")
+	if userID == "" {
+		c.Error(errors.NewBadRequestError("INVALID_USER_ID", "User ID is required"))
+		return
+	}
+
+	var req struct {
+		Role string `json:"role" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.Error(errors.NewBadRequestError("INVALID_REQUEST", "Invalid request format"))
+		return
+	}
+
+	// Convert userID to uint and update role
+	var userIDUint uint
+	if _, err := fmt.Sscanf(userID, "%d", &userIDUint); err != nil {
+		c.Error(errors.NewBadRequestError("INVALID_USER_ID", "User ID must be a number"))
+		return
+	}
+
+	if err := h.service.UpdateUserRole(userIDUint, jwt.Role(req.Role)); err != nil {
+		switch err {
+		case service.ErrUserNotFound:
+			c.Error(errors.NewNotFoundError("USER_NOT_FOUND", "User not found"))
+		case service.ErrInvalidRole:
+			c.Error(errors.NewBadRequestError("INVALID_ROLE", "Invalid role. Must be user, admin, or guest"))
+		default:
+			h.logger.Error("Error updating user role", "error", err.Error())
+			c.Error(errors.NewInternalServerError("SERVER_ERROR", "Failed to update user role"))
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "User role updated successfully",
+	})
 }
