@@ -2,84 +2,44 @@ version: '3.8'
 
 services:
   backend:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: ai-character-demo-backend
+    build: .
     ports:
-      - "8082:8081" 
+      - "8082:8082"
     environment:
-      - PORT=8081
-      - ENV=production
-      - DB_HOST=db
-      - DB_PORT=5432
-      - DB_NAME=ai_character_db
-      - DB_USER=postgres
-      - DB_PASSWORD=postgres
-      - USE_MOCK_AI=${USE_MOCK_AI:-false}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
-      - JWT_SECRET=${JWT_SECRET}
-      - AI_LAYER_URL=http://transcription_service:5000
-      - REDIS_URL=redis://redis:6380
+      - AI_SERVICE_URL=http://ai_layer:8000
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
     depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_started
-    volumes:
-      - ./audio_samples:/app/audio_samples
-    restart: unless-stopped
+      - ai_layer
+      - redis
     networks:
-      - ai-character-network
-      - ai-layer-network
-      - default
-      - shared-network
-    healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8081/api/health"]
-      interval: 30s
-      timeout: 3s
-      retries: 3
-      start_period: 10s
+      - ai_network
 
-  db:
-    image: postgres:15-alpine
-    container_name: ai-character-demo-db
-    ports:
-      - "5432:5432"
+  ai_layer:
+    build: 
+      context: ../AI_Layer2
     environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
-      - POSTGRES_DB=ai_character_db
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    restart: unless-stopped
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - AZURE_LLAMA_ENDPOINT=${AZURE_LLAMA_ENDPOINT}
+      - AZURE_API_KEY=${AZURE_API_KEY}
+      - AZURE_MODEL_NAME=${AZURE_MODEL_NAME}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
     networks:
-      - ai-character-network
-      - default
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      - ai_network
 
   redis:
-    image: redis:latest
+    image: redis:alpine
     ports:
-      - "6380:6379"
+      - "6379:6379"
+    command: redis-server --requirepass ${REDIS_PASSWORD}
     networks:
-      - ai-character-network
-      - default
-
-volumes:
-  postgres_data:
+      - ai_network
 
 networks:
-  ai-character-network:
-    name: ai-character-network
-    external: true
-  ai-layer-network:
-    external: true
-  shared-network:
-    external: true
-  default:
+  ai_network:
+    driver: bridge

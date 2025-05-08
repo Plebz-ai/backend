@@ -1,7 +1,6 @@
 package ai
 
 import (
-	"ai-agent-character-demo/backend/pkg/ws"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -9,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"mime/multipart"
 	"net/http"
 	"os"
 	"sync"
@@ -24,20 +22,33 @@ type AIBridge struct {
 	aiLayerURL      string
 	wsConnections   map[string]*websocket.Conn
 	connMutex       sync.Mutex
-	openAIService   *AIService
 	sessionContexts map[string]*SessionContext
 	contextMutex    sync.Mutex
 	avatarStreams   map[string]string // Maps session ID to stream ID
 	avatarMutex     sync.Mutex
+
+	// Azure LLama settings
+	azureEndpoint  string
+	azureAPIKey    string
+	azureModelName string
+
+	// ElevenLabs settings
+	elevenLabsKey string
+
+	// DeepGram settings
+	deepgramAPIKey string
 }
 
 // SessionContext stores the context for a given session
 type SessionContext struct {
-	CharacterID uint
-	UserID      string
-	Messages    []Message
-	LastActive  time.Time
-	AvatarURL   string
+	CharacterID     uint
+	UserID          string
+	Messages        []Message
+	LastActive      time.Time
+	AvatarURL       string
+	CustomCharacter bool   // Flag for custom character pipeline
+	SystemPrompt    string // Cached system prompt
+	MemoryBuffer    string // Memory from previous conversations
 }
 
 // AILayerResponse represents a response from the AI Layer
@@ -52,6 +63,39 @@ type CreateStreamResponse struct {
 	Offer    map[string]string `json:"offer"`
 }
 
+// Message represents a chat message
+type Message struct {
+	ID        string    `json:"id"`
+	Sender    string    `json:"sender"`
+	Content   string    `json:"content"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+// Character represents a character in the system
+type Character struct {
+	ID          uint      `json:"id"`
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	Personality string    `json:"personality"`
+	VoiceType   string    `json:"voice_type"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	Custom      bool      `json:"custom"`
+}
+
+// AIResponse represents a response from the AI Layer
+type AIResponse struct {
+	Text     string `json:"text"`
+	Emotion  string `json:"emotion"`
+	AudioURL string `json:"audio_url,omitempty"`
+}
+
+// AIError represents an error from the AI Layer
+type AIError struct {
+	Message string `json:"message"`
+	Code    int    `json:"code"`
+}
+
 // NewAIBridge creates a new instance of the AIBridge
 func NewAIBridge() (*AIBridge, error) {
 	aiLayerURL := os.Getenv("AI_SERVICE_URL")
@@ -59,18 +103,40 @@ func NewAIBridge() (*AIBridge, error) {
 		aiLayerURL = "http://localhost:5000"
 	}
 
-	openAIService, err := NewAIService()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create AI service: %v", err)
+	// Load Azure LLama configuration
+	azureEndpoint := os.Getenv("AZURE_LLAMA_ENDPOINT")
+	azureAPIKey := os.Getenv("AZURE_API_KEY")
+	azureModelName := os.Getenv("AZURE_MODEL_NAME")
+	if azureEndpoint == "" || azureAPIKey == "" {
+		return nil, fmt.Errorf("Azure LLama configuration missing: AZURE_LLAMA_ENDPOINT and AZURE_API_KEY are required")
+	}
+	if azureModelName == "" {
+		azureModelName = "llama-2-13b-chat" // Default model name
+	}
+
+	// Load ElevenLabs configuration
+	elevenLabsKey := os.Getenv("ELEVENLABS_API_KEY")
+	if elevenLabsKey == "" {
+		return nil, fmt.Errorf("ElevenLabs API key is required")
+	}
+
+	// Load DeepGram configuration
+	deepgramAPIKey := os.Getenv("DEEPGRAM_API_KEY")
+	if deepgramAPIKey == "" {
+		return nil, fmt.Errorf("DeepGram API key is required for speech-to-text")
 	}
 
 	return &AIBridge{
 		httpClient:      &http.Client{Timeout: 30 * time.Second},
 		aiLayerURL:      aiLayerURL,
 		wsConnections:   make(map[string]*websocket.Conn),
-		openAIService:   openAIService,
 		sessionContexts: make(map[string]*SessionContext),
 		avatarStreams:   make(map[string]string),
+		azureEndpoint:   azureEndpoint,
+		azureAPIKey:     azureAPIKey,
+		azureModelName:  azureModelName,
+		elevenLabsKey:   elevenLabsKey,
+		deepgramAPIKey:  deepgramAPIKey,
 	}, nil
 }
 
@@ -150,107 +216,81 @@ func (b *AIBridge) ProcessAudioChunk(ctx context.Context, sessionID string, audi
 
 	log.Printf("Processing audio chunk for session %s, audio size: %d bytes", sessionID, len(audioData))
 
-	// Call TranscribeAudio which now returns both transcript and AI response
-	transcript, aiResponse, err := b.TranscribeAudio(ctx, sessionID, audioData)
+	// Transcribe audio using DeepGram
+	transcript, err := b.DeepGramSpeechToText(ctx, audioData)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to process audio: %v", err)
+		return "", "", fmt.Errorf("speech-to-text failed: %v", err)
+	}
+
+	// Generate AI response
+	aiResponse, err := b.ProcessTranscript(ctx, sessionID, transcript)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to generate AI response: %v", err)
 	}
 
 	return transcript, aiResponse, nil
 }
 
-// Updated TranscribeAudio to use the new AI Layer endpoints
-func (b *AIBridge) TranscribeAudio(ctx context.Context, sessionID string, audioData []byte) (string, string, error) {
-	url := fmt.Sprintf("%s/process_audio", b.aiLayerURL)
+// DeepGramSpeechToText converts speech to text using DeepGram API
+func (b *AIBridge) DeepGramSpeechToText(ctx context.Context, audioData []byte) (string, error) {
+	url := "https://api.deepgram.com/v1/listen?model=nova-2&language=en&smart_format=true&punctuate=true"
 
-	// Create a new request
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
-	part, err := writer.CreateFormFile("audio", "audio.wav")
+	// Create request
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(audioData))
 	if err != nil {
-		return "", "", fmt.Errorf("failed to create form file: %v", err)
-	}
-	if _, err := part.Write(audioData); err != nil {
-		return "", "", fmt.Errorf("failed to write audio data: %v", err)
+		return "", fmt.Errorf("failed to create DeepGram request: %v", err)
 	}
 
-	// Add session and character ID as form fields if available
-	b.contextMutex.Lock()
-	sessionContext, exists := b.sessionContexts[sessionID]
-	b.contextMutex.Unlock()
+	// Set headers
+	req.Header.Set("Content-Type", "audio/wav")
+	req.Header.Set("Authorization", "Token "+b.deepgramAPIKey)
 
-	if exists {
-		writer.WriteField("session_id", sessionID)
-		writer.WriteField("character_id", fmt.Sprintf("%d", sessionContext.CharacterID))
-	}
-
-	writer.Close()
-
-	req, err := http.NewRequestWithContext(ctx, "POST", url, body)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to create request: %v", err)
-	}
-
-	// Add session and character ID as headers too for redundancy
-	if exists {
-		req.Header.Set("X-Session-ID", sessionID)
-		req.Header.Set("X-Character-ID", fmt.Sprintf("%d", sessionContext.CharacterID))
-	}
-
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-
+	// Send request
 	resp, err := b.httpClient.Do(req)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to send request: %v", err)
+		return "", fmt.Errorf("DeepGram API request failed: %v", err)
 	}
 	defer resp.Body.Close()
 
+	// Check response
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return "", "", fmt.Errorf("transcription service returned status %d: %s", resp.StatusCode, string(respBody))
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("DeepGram API returned status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
-	var result map[string]interface{}
+	// Parse response
+	var result struct {
+		Results struct {
+			Channels []struct {
+				Alternatives []struct {
+					Transcript string `json:"transcript"`
+				} `json:"alternatives"`
+			} `json:"channels"`
+		} `json:"results"`
+	}
+
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", "", fmt.Errorf("failed to decode response: %v", err)
+		return "", fmt.Errorf("failed to decode DeepGram response: %v", err)
 	}
 
-	transcript, ok := result["transcript"].(string)
-	if !ok {
-		return "", "", fmt.Errorf("transcription service response missing 'transcript' field")
+	// Extract transcript from the response
+	if len(result.Results.Channels) > 0 &&
+		len(result.Results.Channels[0].Alternatives) > 0 {
+		return result.Results.Channels[0].Alternatives[0].Transcript, nil
 	}
 
-	// Get AI response from the response field
-	aiResponse, ok := result["response"].(string)
-	if !ok {
-		log.Printf("Warning: AI Layer response missing 'response' field, will fall back to internal AI service")
-		aiResponse = ""
-	} else {
-		log.Printf("Received AI response from AI Layer: %s", aiResponse[:min(50, len(aiResponse))])
-	}
-
-	return transcript, aiResponse, nil
+	return "", fmt.Errorf("no transcript found in DeepGram response")
 }
 
-// ProcessTranscript processes a transcript through the backend AI service
-func (b *AIBridge) ProcessTranscript(ctx context.Context, sessionID string, transcript string) (string, []byte, error) {
+// ProcessTranscript processes a transcript through the LLama model
+func (b *AIBridge) ProcessTranscript(ctx context.Context, sessionID string, transcript string) (string, error) {
 	b.contextMutex.Lock()
 	sessionContext, exists := b.sessionContexts[sessionID]
 	if !exists {
 		b.contextMutex.Unlock()
-		return "", nil, fmt.Errorf("session not found: %s", sessionID)
+		return "", fmt.Errorf("session not found: %s", sessionID)
 	}
 	sessionContext.LastActive = time.Now()
-	b.contextMutex.Unlock()
-
-	// Get character info from the database (simplified for example)
-	character := &Character{
-		ID:          sessionContext.CharacterID,
-		Name:        "AI Assistant",
-		Description: "A helpful AI assistant",
-		Personality: "Friendly, knowledgeable, and responsive",
-		VoiceType:   "default",
-	}
 
 	// Add user message to context
 	userMessage := Message{
@@ -259,52 +299,374 @@ func (b *AIBridge) ProcessTranscript(ctx context.Context, sessionID string, tran
 		Content:   transcript,
 		Timestamp: time.Now(),
 	}
-
-	b.contextMutex.Lock()
 	sessionContext.Messages = append(sessionContext.Messages, userMessage)
-	conversationHistory := sessionContext.Messages
+
+	// Get character info from session context
+	characterID := sessionContext.CharacterID
+	isCustom := sessionContext.CustomCharacter
 	b.contextMutex.Unlock()
 
-	// Generate AI response using existing AIService
-	textResponse, err := b.openAIService.GenerateResponse(character, transcript, conversationHistory)
+	// Generate response based on character type
+	var textResponse string
+	var err error
+
+	if isCustom {
+		// Use custom character pipeline with prompt chaining
+		textResponse, err = b.generateCustomCharacterResponse(ctx, sessionID, transcript)
+	} else {
+		// Use predefined character pipeline
+		textResponse, err = b.generatePredefinedCharacterResponse(ctx, sessionID, transcript)
+	}
+
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to generate response: %v", err)
+		return "", fmt.Errorf("failed to generate response: %v", err)
 	}
 
 	// Add AI response to context
+	b.contextMutex.Lock()
 	aiMessage := Message{
 		ID:        fmt.Sprintf("ai-%d", time.Now().UnixNano()),
 		Sender:    "character",
 		Content:   textResponse,
 		Timestamp: time.Now(),
 	}
-
-	b.contextMutex.Lock()
 	sessionContext.Messages = append(sessionContext.Messages, aiMessage)
 	b.contextMutex.Unlock()
 
-	// Generate speech from text response
-	audioData, err := b.openAIService.TextToSpeech(ctx, textResponse, character.VoiceType)
-	if err != nil {
-		log.Printf("Failed to generate speech: %v", err)
-		// Continue without audio if TTS fails
-	}
-
-	// If there's an active avatar stream, send the audio to it
-	if audioData != nil {
-		err = b.SendAudioToAvatar(sessionID, audioData)
-		if err != nil {
-			log.Printf("Failed to send audio to avatar: %v", err)
-			// Continue even if avatar animation fails
-		}
-	}
-
-	return textResponse, audioData, nil
+	return textResponse, nil
 }
 
-// Replace the AI-Layer TTS proxy with internal AIService.TextToSpeech
+// generatePredefinedCharacterResponse generates a response for predefined characters
+func (b *AIBridge) generatePredefinedCharacterResponse(ctx context.Context, sessionID string, userInput string) (string, error) {
+	b.contextMutex.Lock()
+	sessionContext := b.sessionContexts[sessionID]
+	characterID := sessionContext.CharacterID
+	messages := sessionContext.Messages
+
+	// Get system prompt (cached or generate new one)
+	systemPrompt := sessionContext.SystemPrompt
+	b.contextMutex.Unlock()
+
+	// If no system prompt cached, fetch character and generate one
+	if systemPrompt == "" {
+		character, err := b.getCharacterByID(characterID)
+		if err != nil {
+			return "", fmt.Errorf("failed to get character: %v", err)
+		}
+
+		systemPrompt = fmt.Sprintf(
+			"You are %s. %s Your personality traits are: %s. Respond in character, being concise and engaging.",
+			character.Name,
+			character.Description,
+			character.Personality,
+		)
+
+		// Cache the system prompt
+		b.contextMutex.Lock()
+		b.sessionContexts[sessionID].SystemPrompt = systemPrompt
+		b.contextMutex.Unlock()
+	}
+
+	// Prepare conversation history for the LLM
+	var llmMessages []map[string]string
+
+	// Add system message
+	llmMessages = append(llmMessages, map[string]string{
+		"role":    "system",
+		"content": systemPrompt,
+	})
+
+	// Add conversation history (limited to last 10 messages to stay within context window)
+	startIdx := 0
+	if len(messages) > 10 {
+		startIdx = len(messages) - 10
+	}
+
+	for i := startIdx; i < len(messages)-1; i++ { // Exclude the most recent user message
+		role := "assistant"
+		if messages[i].Sender == "user" {
+			role = "user"
+		}
+
+		llmMessages = append(llmMessages, map[string]string{
+			"role":    role,
+			"content": messages[i].Content,
+		})
+	}
+
+	// Add the current user message
+	llmMessages = append(llmMessages, map[string]string{
+		"role":    "user",
+		"content": userInput,
+	})
+
+	// Call Azure-hosted LLama model
+	return b.callAzureLLama(llmMessages)
+}
+
+// generateCustomCharacterResponse generates a response for custom characters using prompt chaining
+func (b *AIBridge) generateCustomCharacterResponse(ctx context.Context, sessionID string, userInput string) (string, error) {
+	b.contextMutex.Lock()
+	sessionContext := b.sessionContexts[sessionID]
+	characterID := sessionContext.CharacterID
+	messages := sessionContext.Messages
+	systemPrompt := sessionContext.SystemPrompt
+	b.contextMutex.Unlock()
+
+	// Get character information
+	character, err := b.getCharacterByID(characterID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get character: %v", err)
+	}
+
+	// Step 1: If no enriched system prompt exists, use LLM1 to generate one
+	if systemPrompt == "" {
+		// Prepare prompt for LLM1
+		promptTemplate := `
+		You are an expert AI character designer. Your task is to create a rich system prompt for a character with the following attributes:
+		
+		Name: %s
+		Description: %s
+		Personality: %s
+		
+		The system prompt should be detailed and capture the essence of this character. 
+		Include personality traits, speaking style, background information, and specific behavioral guidelines.
+		Format your response as a system prompt that starts with "You are [character name]."
+		`
+
+		llm1Prompt := fmt.Sprintf(
+			promptTemplate,
+			character.Name,
+			character.Description,
+			character.Personality,
+		)
+
+		// Call LLM1 to generate the enriched system prompt
+		llm1Messages := []map[string]string{
+			{"role": "system", "content": "You're an expert prompt engineer. Create detailed character system prompts."},
+			{"role": "user", "content": llm1Prompt},
+		}
+
+		enrichedPrompt, err := b.callAzureLLama(llm1Messages)
+		if err != nil {
+			return "", fmt.Errorf("failed to generate enriched prompt: %v", err)
+		}
+
+		// Cache the enriched system prompt
+		b.contextMutex.Lock()
+		b.sessionContexts[sessionID].SystemPrompt = enrichedPrompt
+		systemPrompt = enrichedPrompt
+		b.contextMutex.Unlock()
+	}
+
+	// Step 2: Use LLM2 with the enriched prompt to generate the response
+	// Prepare conversation history for LLM2
+	var llm2Messages []map[string]string
+
+	// Add system message with enriched prompt
+	llm2Messages = append(llm2Messages, map[string]string{
+		"role":    "system",
+		"content": systemPrompt,
+	})
+
+	// Add conversation history (limited to last 10 messages to stay within context window)
+	startIdx := 0
+	if len(messages) > 10 {
+		startIdx = len(messages) - 10
+	}
+
+	for i := startIdx; i < len(messages)-1; i++ { // Exclude the most recent user message
+		role := "assistant"
+		if messages[i].Sender == "user" {
+			role = "user"
+		}
+
+		llm2Messages = append(llm2Messages, map[string]string{
+			"role":    role,
+			"content": messages[i].Content,
+		})
+	}
+
+	// Add the current user message
+	llm2Messages = append(llm2Messages, map[string]string{
+		"role":    "user",
+		"content": userInput,
+	})
+
+	// Call LLM2 to generate the final response
+	return b.callAzureLLama(llm2Messages)
+}
+
+// callAzureLLama calls the Azure-hosted LLama model
+func (b *AIBridge) callAzureLLama(messages []map[string]string) (string, error) {
+	url := fmt.Sprintf("%s/openai/deployments/%s/chat/completions?api-version=2023-07-01-preview",
+		b.azureEndpoint, b.azureModelName)
+
+	// Prepare request body
+	requestBody := map[string]interface{}{
+		"messages":          messages,
+		"temperature":       0.7,
+		"max_tokens":        800,
+		"top_p":             0.95,
+		"frequency_penalty": 0,
+		"presence_penalty":  0,
+	}
+
+	jsonData, err := json.Marshal(requestBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request body: %v", err)
+	}
+
+	// Create request
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %v", err)
+	}
+
+	// Set headers
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("api-key", b.azureAPIKey)
+
+	// Send request
+	resp, err := b.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to send request to Azure: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Check response status
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("Azure API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	// Parse response
+	var result struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("failed to decode Azure API response: %v", err)
+	}
+
+	// Extract the generated text
+	if len(result.Choices) > 0 {
+		return result.Choices[0].Message.Content, nil
+	}
+
+	return "", fmt.Errorf("no response generated by Azure LLama")
+}
+
+// getCharacterByID fetches character information by ID
+// In a real implementation, this would query a database
+func (b *AIBridge) getCharacterByID(characterID uint) (*Character, error) {
+	// This is a placeholder - in a real implementation, you'd query your database
+	// For now, we return a hardcoded character based on ID
+	switch characterID {
+	case 1:
+		return &Character{
+			ID:          1,
+			Name:        "AI Assistant",
+			Description: "A helpful AI assistant",
+			Personality: "Friendly, knowledgeable, and responsive",
+			VoiceType:   "natural",
+			Custom:      false,
+		}, nil
+	case 2:
+		return &Character{
+			ID:          2,
+			Name:        "Adventure Guide",
+			Description: "An enthusiastic guide for your adventures",
+			Personality: "Energetic, encouraging, and adventure-loving",
+			VoiceType:   "animated",
+			Custom:      false,
+		}, nil
+	default:
+		return &Character{
+			ID:          characterID,
+			Name:        fmt.Sprintf("Character %d", characterID),
+			Description: "A custom character",
+			Personality: "Adaptable and unique",
+			VoiceType:   "natural",
+			Custom:      true,
+		}, nil
+	}
+}
+
+// TextToSpeech converts text to speech using ElevenLabs
 func (b *AIBridge) TextToSpeech(ctx context.Context, text string, voiceType string) ([]byte, error) {
-	return b.openAIService.TextToSpeech(ctx, text, voiceType)
+	voiceID := b.getVoiceIDForType(voiceType)
+	url := fmt.Sprintf("https://api.elevenlabs.io/v1/text-to-speech/%s", voiceID)
+
+	type ttsRequest struct {
+		Text          string `json:"text"`
+		VoiceSettings struct {
+			Stability       float64 `json:"stability"`
+			SimilarityBoost float64 `json:"similarity_boost"`
+		} `json:"voice_settings"`
+	}
+
+	requestBody := ttsRequest{
+		Text: text,
+		VoiceSettings: struct {
+			Stability       float64 `json:"stability"`
+			SimilarityBoost float64 `json:"similarity_boost"`
+		}{
+			Stability:       0.75,
+			SimilarityBoost: 0.75,
+		},
+	}
+
+	jsonData, err := json.Marshal(requestBody)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling TTS request: %v", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("error creating TTS request: %v", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("xi-api-key", b.elevenLabsKey)
+	req.Header.Set("Accept", "audio/mpeg")
+
+	resp, err := b.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("error making TTS API request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("TTS API request failed with status code %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	audioData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("error reading TTS response body: %v", err)
+	}
+
+	return audioData, nil
+}
+
+// getVoiceIDForType maps voice type to ElevenLabs voice ID
+func (b *AIBridge) getVoiceIDForType(voiceType string) string {
+	// Default voice IDs for different types
+	switch voiceType {
+	case "natural":
+		return "21m00Tcm4TlvDq8ikWAM" // Rachel
+	case "robotic":
+		return "AZnzlk1XvdvUeBnXmlld" // Domi
+	case "animated":
+		return "MF3mGyEYCl7XYWbV9V6O" // Bella
+	default:
+		return "21m00Tcm4TlvDq8ikWAM" // Default to Rachel
+	}
 }
 
 // SendAudioToAvatar sends the generated audio to the avatar animation service
@@ -341,65 +703,6 @@ func (b *AIBridge) SendAudioToAvatar(sessionID string, audioData []byte) error {
 	return nil
 }
 
-// SendResponseToFrontend sends the AI response to the frontend via WebSocket
-func (b *AIBridge) SendResponseToFrontend(sessionID string, textResponse string, audioData []byte) error {
-	// This would integrate with your existing WebSocket server
-	// For this example, we'll just log the response
-	log.Printf("Response for session %s: %s", sessionID, textResponse)
-	if len(audioData) > 0 {
-		log.Printf("Generated audio of %d bytes", len(audioData))
-	}
-	return nil
-}
-
-// Enhance error handling and retry logic in getOrCreateWSConnection
-func (b *AIBridge) getOrCreateWSConnection(sessionID string) (*websocket.Conn, error) {
-	b.connMutex.Lock()
-	defer b.connMutex.Unlock()
-
-	conn, exists := b.wsConnections[sessionID]
-	if exists {
-		return conn, nil
-	}
-
-	const maxRetries = 3
-	var lastErr error
-
-	for i := 0; i < maxRetries; i++ {
-		// Perform health check
-		httpURL := fmt.Sprintf("%s/healthz", b.aiLayerURL)
-		httpResp, err := http.Get(httpURL)
-		if err != nil {
-			log.Printf("Health check failed (attempt %d/%d): %v", i+1, maxRetries, err)
-			lastErr = err
-			continue
-		}
-		httpResp.Body.Close()
-		if httpResp.StatusCode != http.StatusOK {
-			log.Printf("Health check returned status %d (attempt %d/%d)", httpResp.StatusCode, i+1, maxRetries)
-			lastErr = fmt.Errorf("health check failed with status %d", httpResp.StatusCode)
-			continue
-		}
-
-		// Attempt WebSocket connection
-		wsURL := fmt.Sprintf("ws://%s/ws/asr", b.aiLayerURL[7:])
-		log.Printf("Attempting to connect to WebSocket at: %s (attempt %d/%d)", wsURL, i+1, maxRetries)
-		conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
-		if err != nil {
-			log.Printf("WebSocket connection failed (attempt %d/%d): %v", i+1, maxRetries, err)
-			lastErr = err
-			continue
-		}
-
-		b.wsConnections[sessionID] = conn
-		log.Printf("Successfully connected to WebSocket at: %s", wsURL)
-		return conn, nil
-	}
-
-	log.Printf("Failed to establish WebSocket connection after %d attempts: %v", maxRetries, lastErr)
-	return nil, fmt.Errorf("failed to establish WebSocket connection after %d attempts: %v", maxRetries, lastErr)
-}
-
 // CleanupSession removes a session and its WebSocket connection
 func (b *AIBridge) CleanupSession(sessionID string) {
 	// Close WebSocket connection
@@ -428,25 +731,8 @@ func (b *AIBridge) CleanupSession(sessionID string) {
 	b.contextMutex.Unlock()
 }
 
-// Implement API endpoint handlers
+// SetupAPIHandlers sets up HTTP API handlers for the AI Bridge
 func (b *AIBridge) SetupAPIHandlers(mux *http.ServeMux) {
-	// Get pending audio chunks
-	mux.HandleFunc("/api/ml/audio/chunks/pending", func(w http.ResponseWriter, r *http.Request) {
-		// Implementation would fetch pending audio chunks from your database
-		chunks := []map[string]interface{}{
-			{
-				"id":        "chunk1",
-				"sessionId": "session1",
-				"status":    "pending",
-				"createdAt": time.Now().Format(time.RFC3339),
-			},
-		}
-
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"chunks": chunks,
-		})
-	})
-
 	// Process audio chunk
 	mux.HandleFunc("/api/ml/audio/chunks/process", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
@@ -477,18 +763,28 @@ func (b *AIBridge) SetupAPIHandlers(mux *http.ServeMux) {
 			return
 		}
 
-		textResponse, audioData, err := b.ProcessTranscript(r.Context(), requestBody.SessionID, transcript)
+		// Generate TTS response
+		voiceType := "natural" // Default voice type
+		b.contextMutex.Lock()
+		if session, exists := b.sessionContexts[requestBody.SessionID]; exists {
+			character, _ := b.getCharacterByID(session.CharacterID)
+			if character != nil {
+				voiceType = character.VoiceType
+			}
+		}
+		b.contextMutex.Unlock()
+
+		audioData, err := b.TextToSpeech(r.Context(), aiResponse, voiceType)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+			log.Printf("TTS failed: %v", err)
+			// Continue without audio if TTS fails
 		}
 
 		// Return response
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"transcript":   transcript,
-			"aiResponse":   aiResponse,
-			"textResponse": textResponse,
-			"audioData":    base64.StdEncoding.EncodeToString(audioData),
+			"transcript": transcript,
+			"aiResponse": aiResponse,
+			"audioData":  base64.StdEncoding.EncodeToString(audioData),
 		})
 	})
 
@@ -534,45 +830,110 @@ func (b *AIBridge) SetupAPIHandlers(mux *http.ServeMux) {
 			"status": "success",
 		})
 	})
+
+	// Handler for creating a custom character
+	mux.HandleFunc("/api/ml/characters/custom", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var requestBody struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+			Personality string `json:"personality"`
+			VoiceType   string `json:"voiceType"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		// In a real implementation, you would save this to a database
+		// and return the created character ID
+
+		// Return a mock response for now
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"id":          999, // Mock ID
+			"name":        requestBody.Name,
+			"description": requestBody.Description,
+			"personality": requestBody.Personality,
+			"voiceType":   requestBody.VoiceType,
+			"custom":      true,
+			"createdAt":   time.Now(),
+		})
+	})
+
+	// Health check endpoint
+	mux.HandleFunc("/api/ml/healthz", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]string{
+			"status":  "ok",
+			"version": "1.0.0",
+		})
+	})
 }
 
 // GenerateTextResponse generates a text response for a character based on a user message and conversation history
 func (b *AIBridge) GenerateTextResponse(character interface{}, userMessage string, history interface{}) (string, error) {
-	// Convert the generic interfaces to our internal types
-	char, ok := character.(*ws.Character)
+	// Create a session ID for this one-time request
+	sessionID := fmt.Sprintf("temp-%d", time.Now().UnixNano())
+
+	// Extract character info
+	char, ok := character.(*Character)
 	if !ok {
 		return "", fmt.Errorf("invalid character type")
 	}
 
-	// Convert to internal Character type
-	internalChar := &Character{
-		ID:          char.ID,
-		Name:        char.Name,
-		Description: char.Description,
-		Personality: char.Personality,
-		VoiceType:   char.VoiceType,
+	// Create temporary session context
+	b.contextMutex.Lock()
+	b.sessionContexts[sessionID] = &SessionContext{
+		CharacterID:     char.ID,
+		UserID:          "temp-user",
+		Messages:        []Message{},
+		LastActive:      time.Now(),
+		CustomCharacter: char.Custom,
 	}
 
-	// Convert history if provided
-	var messages []Message
+	// Add history messages if available
 	if history != nil {
-		chatHistory, ok := history.([]ws.ChatMessage)
-		if !ok {
-			return "", fmt.Errorf("invalid chat history type")
+		historyMessages := []Message{}
+
+		// Convert history to internal format based on type
+		switch h := history.(type) {
+		case []Message:
+			historyMessages = h
+		case []map[string]interface{}:
+			for _, msg := range h {
+				historyMessages = append(historyMessages, Message{
+					ID:        fmt.Sprintf("%v", msg["ID"]),
+					Sender:    fmt.Sprintf("%v", msg["Sender"]),
+					Content:   fmt.Sprintf("%v", msg["Content"]),
+					Timestamp: time.Now(), // Use current time as fallback
+				})
+			}
 		}
 
-		for _, msg := range chatHistory {
-			messages = append(messages, Message{
-				ID:        msg.ID,
-				Sender:    msg.Sender,
-				Content:   msg.Content,
-				Timestamp: msg.Timestamp,
-			})
-		}
+		b.sessionContexts[sessionID].Messages = historyMessages
 	}
+	b.contextMutex.Unlock()
 
-	// Use the existing GenerateResponse method with our converted types
-	return b.openAIService.GenerateResponse(internalChar, userMessage, messages)
+	// Clean up the session when done
+	defer func() {
+		b.contextMutex.Lock()
+		delete(b.sessionContexts, sessionID)
+		b.contextMutex.Unlock()
+	}()
+
+	// Process the message through appropriate pipeline
+	response, err := b.ProcessTranscript(context.Background(), sessionID, userMessage)
+	return response, err
 }
 
-// Helper function to avoid panic with string substring is defined in ai_service.go
+// Helper function to avoid panic with string substring
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
