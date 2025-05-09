@@ -232,9 +232,6 @@ func (s *AdapterService) EndSession(sessionID string) error {
 		return errors.New("session not found")
 	}
 
-	// Clean up in AI bridge
-	s.aiBridge.CleanupSession(sessionID)
-
 	// Remove from our tracking
 	delete(s.sessions, sessionID)
 
@@ -266,40 +263,40 @@ func (s *AdapterService) ProcessAudioChunk(ctx context.Context, chunkID string) 
 	}
 	sessionInfo.LastActive = time.Now()
 
-	// Process through AI bridge
-	transcript, aiResponse, err := s.aiBridge.ProcessAudioChunk(ctx, chunk.SessionID, chunk.AudioData)
+	// 1. Speech-to-text
+	transcript, _, err := s.aiBridge.SpeechToText(ctx, chunk.SessionID, chunk.AudioData)
 	if err != nil {
 		s.audioService.UpdateProcessingStatus(chunkID, "failed")
 		return "", nil, fmt.Errorf("speech-to-text processing failed: %v", err)
 	}
 
-	// If we got an AI response from the LLM_Layer, use it
-	var textResponse string
-	var audioResponse []byte
+	// 2. Generate response (chat)
+	character, err := s.charService.GetCharacter(chunk.CharID)
+	if err != nil {
+		s.audioService.UpdateProcessingStatus(chunkID, "failed")
+		return "", nil, fmt.Errorf("failed to get character: %v", err)
+	}
+	wsChar := &ws.Character{
+		ID:          character.ID,
+		Name:        character.Name,
+		Description: character.Description,
+		Personality: character.Personality,
+		VoiceType:   character.VoiceType,
+		CreatedAt:   character.CreatedAt,
+		UpdatedAt:   character.UpdatedAt,
+	}
+	// Optionally, fetch conversation history if needed
+	var history []ws.ChatMessage
+	textResponse, err := s.aiBridge.GenerateTextResponse(wsChar, transcript, history)
+	if err != nil {
+		s.audioService.UpdateProcessingStatus(chunkID, "failed")
+		return "", nil, fmt.Errorf("response generation failed: %v", err)
+	}
 
-	if aiResponse != "" {
-		// Use the AI response from LLM_Layer
-		log.Printf("Using AI response from LLM_Layer for session %s", chunk.SessionID)
-		textResponse = aiResponse
-
-		// Generate TTS for the AI response
-		audioResponse, err = s.aiBridge.TextToSpeech(ctx, aiResponse, "default")
-		if err != nil {
-			log.Printf("Warning: Failed to generate speech for AI response: %v", err)
-		}
-	} else {
-		// Fall back to generating response with the internal AI service
-		textResponse, err = s.aiBridge.ProcessTranscript(ctx, chunk.SessionID, transcript)
-		if err != nil {
-			s.audioService.UpdateProcessingStatus(chunkID, "failed")
-			return "", nil, fmt.Errorf("response generation failed: %v", err)
-		}
-
-		// Generate TTS for the response
-		audioResponse, err = s.aiBridge.TextToSpeech(ctx, textResponse, "default")
-		if err != nil {
-			log.Printf("Warning: Failed to generate speech for response: %v", err)
-		}
+	// 3. Text-to-speech
+	audioResponse, err := s.aiBridge.TextToSpeech(ctx, textResponse, wsChar.VoiceType)
+	if err != nil {
+		log.Printf("Warning: Failed to generate speech for response: %v", err)
 	}
 
 	// Update status to completed
@@ -319,23 +316,8 @@ func (s *AdapterService) GetSessionInfo(sessionID string) (*SessionInfo, error) 
 	return sessionInfo, nil
 }
 
-// UpdateAvatarForSession updates the avatar URL for an existing session
+// UpdateAvatarForSession is now a no-op (avatar streaming not supported)
 func (s *AdapterService) UpdateAvatarForSession(sessionID string, avatarURL string) error {
-	sessionInfo, exists := s.sessions[sessionID]
-	if !exists {
-		return errors.New("session not found")
-	}
-
-	// Update session info
-	sessionInfo.AvatarURL = avatarURL
-	sessionInfo.LastActive = time.Now()
-
-	// Create an avatar stream in the AI layer
-	err := s.aiBridge.InitAvatarStream(sessionID, avatarURL)
-	if err != nil {
-		return fmt.Errorf("failed to setup avatar: %v", err)
-	}
-
 	return nil
 }
 
@@ -387,38 +369,36 @@ func (s *AdapterService) ProcessAudioData(ctx context.Context, sessionID string,
 	}
 	sessionInfo.LastActive = time.Now()
 
-	// Process through AI bridge
-	transcript, aiResponse, err := s.aiBridge.ProcessAudioChunk(ctx, sessionID, audioData)
+	// 1. Speech-to-text
+	transcript, _, err := s.aiBridge.SpeechToText(ctx, sessionID, audioData)
 	if err != nil {
 		return "", nil, fmt.Errorf("speech-to-text processing failed: %v", err)
 	}
 
-	// If we got an AI response from the LLM_Layer, use it
-	var textResponse string
-	var audioResponse []byte
+	// 2. Generate response (chat)
+	character, err := s.charService.GetCharacter(sessionInfo.CharacterID)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to get character: %v", err)
+	}
+	wsChar := &ws.Character{
+		ID:          character.ID,
+		Name:        character.Name,
+		Description: character.Description,
+		Personality: character.Personality,
+		VoiceType:   character.VoiceType,
+		CreatedAt:   character.CreatedAt,
+		UpdatedAt:   character.UpdatedAt,
+	}
+	var history []ws.ChatMessage
+	textResponse, err := s.aiBridge.GenerateTextResponse(wsChar, transcript, history)
+	if err != nil {
+		return "", nil, fmt.Errorf("response generation failed: %v", err)
+	}
 
-	if aiResponse != "" {
-		// Use the AI response from LLM_Layer
-		log.Printf("Using AI response from LLM_Layer for session %s", sessionID)
-		textResponse = aiResponse
-
-		// Generate TTS for the AI response
-		audioResponse, err = s.aiBridge.TextToSpeech(ctx, aiResponse, "default")
-		if err != nil {
-			log.Printf("Warning: Failed to generate speech for AI response: %v", err)
-		}
-	} else {
-		// Fall back to generating response with the internal AI service
-		textResponse, err = s.aiBridge.ProcessTranscript(ctx, sessionID, transcript)
-		if err != nil {
-			return "", nil, fmt.Errorf("response generation failed: %v", err)
-		}
-
-		// Generate TTS for the response
-		audioResponse, err = s.aiBridge.TextToSpeech(ctx, textResponse, "default")
-		if err != nil {
-			log.Printf("Warning: Failed to generate speech for response: %v", err)
-		}
+	// 3. Text-to-speech
+	audioResponse, err := s.aiBridge.TextToSpeech(ctx, textResponse, wsChar.VoiceType)
+	if err != nil {
+		log.Printf("Warning: Failed to generate speech for response: %v", err)
 	}
 
 	return textResponse, audioResponse, nil

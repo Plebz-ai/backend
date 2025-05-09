@@ -1,3 +1,7 @@
+-- Ensure the database is created
+CREATE DATABASE character_demo;
+\c character_demo
+
 -- Create necessary tables
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
@@ -48,4 +52,4 @@ CREATE TABLE IF NOT EXISTS audio_chunks (
 -- Create indexes
 CREATE INDEX IF NOT EXISTS idx_messages_char_session ON messages(character_id, session_id);
 CREATE INDEX IF NOT EXISTS idx_audio_session ON audio_chunks(session_id);
-CREATE INDEX IF NOT EXISTS idx_audio_status ON audio_chunks(processing_status); 
+CREATE INDEX IF NOT EXISTS idx_audio_status ON audio_chunks(processing_status);

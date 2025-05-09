@@ -5,8 +5,7 @@ import (
 	"ai-agent-character-demo/backend/internal/service"
 	"ai-agent-character-demo/backend/internal/ws"
 	"ai-agent-character-demo/backend/pkg/jwt"
-	"ai-agent-character-demo/backend/pkg/logger"
-	pkgws "ai-agent-character-demo/backend/pkg/ws" // Aliased to avoid conflicts
+	"ai-agent-character-demo/backend/pkg/logger" // Aliased to avoid conflicts
 	"context"
 	"fmt"
 	"time"
@@ -90,27 +89,8 @@ func New(db *gorm.DB, config *Config) (*Container, error) {
 	aiServiceAdapter := service.NewAIServiceAdapter(
 		// GenerateResponse adapter
 		func(character *ws.Character, userMessage string, history []ws.ChatMessage) (string, error) {
-			// Convert from internal/ws to pkg/ws types if needed
-			pkgCharacter := &pkgws.Character{
-				ID:          character.ID,
-				Name:        character.Name,
-				Description: character.Description,
-				Personality: character.Personality,
-				VoiceType:   character.VoiceType,
-			}
-
-			var pkgHistory []pkgws.ChatMessage
-			for _, msg := range history {
-				pkgHistory = append(pkgHistory, pkgws.ChatMessage{
-					ID:        msg.ID,
-					Content:   msg.Content,
-					Sender:    msg.Sender,
-					Timestamp: msg.Timestamp,
-				})
-			}
-
-			// Use AI Bridge to generate response
-			return aiBridge.GenerateTextResponse(pkgCharacter, userMessage, pkgHistory)
+			// Pass internal/ws types directly (no conversion needed)
+			return aiBridge.GenerateTextResponse(character, userMessage, history)
 		},
 		// TextToSpeech adapter
 		func(ctx context.Context, text string, voiceType string) ([]byte, error) {
@@ -118,7 +98,7 @@ func New(db *gorm.DB, config *Config) (*Container, error) {
 		},
 		// SpeechToText adapter
 		func(ctx context.Context, sessionID string, audioData []byte) (string, string, error) {
-			return aiBridge.ProcessAudioChunk(ctx, sessionID, audioData)
+			return aiBridge.SpeechToText(ctx, sessionID, audioData)
 		},
 	)
 

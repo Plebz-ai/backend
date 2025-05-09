@@ -17,6 +17,9 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// NOTE: The context key for user ID is always 'userId' (lowercase 'd'), matching the auth middleware.
+// Do not use 'userID' (uppercase 'D').
+
 type CharacterHandler struct {
 	service *service.CharacterService
 }
@@ -172,7 +175,7 @@ func (h *CharacterHandler) GetCharacter(c *gin.Context) {
 
 func (h *CharacterHandler) ListCharacters(c *gin.Context) {
 	// Get user ID from the JWT token context
-	userIdInterface, exists := c.Get("userID")
+	userIdInterface, exists := c.Get("userId")
 	if !exists {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
 		return

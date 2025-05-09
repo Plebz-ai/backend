@@ -3,6 +3,8 @@ package jwt
 import (
 	"errors"
 	"fmt"
+	"log"
+	"os"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -61,10 +63,8 @@ type Service struct {
 
 // NewService creates a new JWT service
 func NewService(secretKey string, expiry time.Duration) *Service {
-	if secretKey == "" {
-		secretKey = getSecretKey()
-	}
-
+	// Always load from env if possible
+	secretKey = getSecretKey()
 	if expiry == 0 {
 		expiry = 24 * time.Hour // Default to 24 hours
 	}
@@ -81,8 +81,12 @@ func NewService(secretKey string, expiry time.Duration) *Service {
 	}
 }
 
-// getSecretKey is a utility function that can be used when no secret key is provided
+// getSecretKey is a utility function that always loads from env
 func getSecretKey() string {
+	key := os.Getenv("JWT_SECRET")
+	if key != "" {
+		return key
+	}
 	// Default secret key for development environments - do not use in production
 	return "character-app-development-secret-key"
 }
@@ -127,17 +131,21 @@ func (s *Service) GenerateRefreshToken(userID uint) (string, error) {
 // ValidateToken validates a JWT token and returns the claims
 func (s *Service) ValidateToken(tokenString string) (*JWTClaims, error) {
 	if tokenString == "" {
+		log.Printf("[JWT] Empty token string")
 		return nil, ErrTokenEmpty
 	}
 
+	log.Printf("[JWT] Validating token: %s", tokenString)
 	token, err := jwt.ParseWithClaims(tokenString, &JWTClaims{}, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			log.Printf("[JWT] Invalid signing method: %v", token.Header["alg"])
 			return nil, fmt.Errorf("%w: %v", ErrInvalidSigningKey, token.Header["alg"])
 		}
 		return s.secretKey, nil
 	})
 
 	if err != nil {
+		log.Printf("[JWT] Token parse error: %v", err)
 		if errors.Is(err, jwt.ErrTokenExpired) || errors.Is(err, jwt.ErrTokenSignatureInvalid) {
 			return nil, ErrExpiredToken
 		}
@@ -145,14 +153,17 @@ func (s *Service) ValidateToken(tokenString string) (*JWTClaims, error) {
 	}
 
 	if !token.Valid {
+		log.Printf("[JWT] Token is not valid")
 		return nil, ErrInvalidToken
 	}
 
 	claims, ok := token.Claims.(*JWTClaims)
 	if !ok {
+		log.Printf("[JWT] Token claims are not JWTClaims: %+v", token.Claims)
 		return nil, ErrInvalidClaims
 	}
 
+	log.Printf("[JWT] Token validated successfully. Claims: %+v", claims)
 	return claims, nil
 }
 

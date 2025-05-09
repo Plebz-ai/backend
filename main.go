@@ -2,6 +2,7 @@ package main
 
 import (
 	"ai-agent-character-demo/backend/ai"
+	"ai-agent-character-demo/backend/internal/api"
 	"ai-agent-character-demo/backend/internal/models"
 	"ai-agent-character-demo/backend/internal/service"
 	"ai-agent-character-demo/backend/internal/ws"
@@ -30,6 +31,8 @@ func main() {
 	if err := godotenv.Load(); err != nil {
 		log.Println("Warning: .env file not found, using environment variables")
 	}
+
+	log.Printf("[DEBUG] JWT_SECRET at startup: %s", os.Getenv("JWT_SECRET"))
 
 	// Initialize database
 	db, err := setupDatabase()
@@ -109,22 +112,80 @@ func main() {
 		ws.ServeWs(hub, c)
 	})
 
-	// Create standard HTTP ServeMux for the AIBridge
-	mux := http.NewServeMux()
-	bridge.SetupAPIHandlers(mux)
+	// Initialize controllers for legacy and v1 routes
+	authHandler := api.NewAuthHandler(userService, jwtService, logger)
+	characterHandler := service.NewCharacterService(db)
+	characterApiHandler := api.NewCharacterHandler(characterHandler)
+	messageService := service.NewMessageService(db)
+	messageHandler := api.NewMessageController(messageService, characterHandler, aiServiceAdapter, jwtService)
+	audioHandler := api.NewAudioController(audioService, jwtService)
 
-	// Create a handler that combines the Gin engine and ServeMux
-	combinedHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// If the path starts with /api/, use the Gin engine
-		if r.URL.Path == "/ws" {
-			ginEngine.ServeHTTP(w, r)
-		} else {
-			mux.ServeHTTP(w, r)
+	// Set up /api legacy routes for frontend compatibility
+	apiLegacy := ginEngine.Group("/api")
+	{
+		// Health
+		apiLegacy.GET("/health", func(c *gin.Context) {
+			c.JSON(200, gin.H{"status": "ok"})
+		})
+
+		// Auth
+		apiLegacy.POST("/auth/login", authHandler.Login)
+		apiLegacy.POST("/auth/signup", authHandler.Signup)
+		apiLegacy.GET("/auth/me", func(c *gin.Context) {
+			token := c.GetHeader("Authorization")
+			if token == "" {
+				c.JSON(401, gin.H{"error": "Authorization header is required"})
+				return
+			}
+			if len(token) > 7 && token[:7] == "Bearer " {
+				token = token[7:]
+			}
+			claims, err := jwtService.ValidateToken(token)
+			if err != nil {
+				c.JSON(401, gin.H{"error": "Invalid token"})
+				return
+			}
+			c.Set("userId", claims.UserID)
+			authHandler.Me(c)
+		})
+
+		// --- JWT Middleware for legacy protected routes ---
+		legacyJWT := func(c *gin.Context) {
+			token := c.GetHeader("Authorization")
+			if token == "" {
+				token = c.GetHeader("authorization") // Support lowercase header
+			}
+			if token == "" {
+				c.JSON(401, gin.H{"error": "Authorization header is required"})
+				c.Abort()
+				return
+			}
+			if len(token) > 7 && token[:7] == "Bearer " {
+				token = token[7:]
+			}
+			claims, err := jwtService.ValidateToken(token)
+			if err != nil {
+				c.JSON(401, gin.H{"error": "Invalid token"})
+				c.Abort()
+				return
+			}
+			c.Set("userId", claims.UserID)
+			c.Next()
 		}
-	})
 
-	// Set up basic routes for audio processing
-	setupBasicRoutes(mux, audioService, adapterService)
+		// Characters (protected)
+		apiLegacy.GET("/characters", legacyJWT, characterApiHandler.ListCharacters)
+		apiLegacy.GET("/characters/:id", legacyJWT, characterApiHandler.GetCharacter)
+		apiLegacy.POST("/characters", legacyJWT, characterApiHandler.CreateCharacter)
+
+		// Messages (protected)
+		apiLegacy.GET("/messages/session/:sessionId", legacyJWT, messageHandler.GetSessionMessages)
+		apiLegacy.POST("/messages/send", legacyJWT, messageHandler.SendMessage)
+
+		// Audio (protected)
+		apiLegacy.POST("/audio/upload", legacyJWT, audioHandler.UploadAudio)
+		apiLegacy.GET("/audio/session/:sessionId", legacyJWT, audioHandler.GetSessionAudio)
+	}
 
 	// Get the port from the environment
 	port := os.Getenv("PORT")
@@ -132,10 +193,10 @@ func main() {
 		port = "8081"
 	}
 
-	// Create the server
+	// Create the server using Gin engine only
 	server := &http.Server{
 		Addr:    ":" + port,
-		Handler: combinedHandler,
+		Handler: ginEngine,
 	}
 
 	// Start the server in a goroutine
@@ -171,36 +232,7 @@ func createAIServiceAdapter(bridge *ai.AIBridge) *service.AIServiceAdapter {
 	return service.NewAIServiceAdapter(
 		// GenerateResponse adapter
 		func(character *ws.Character, userMessage string, history []ws.ChatMessage) (string, error) {
-			// Convert to the right type
-			pkgCharacter := &ai.Character{
-				ID:          character.ID,
-				Name:        character.Name,
-				Description: character.Description,
-				Personality: character.Personality,
-				VoiceType:   character.VoiceType,
-			}
-
-			var pkgHistory []struct {
-				ID        string
-				Content   string
-				Sender    string
-				Timestamp time.Time
-			}
-			for _, msg := range history {
-				pkgHistory = append(pkgHistory, struct {
-					ID        string
-					Content   string
-					Sender    string
-					Timestamp time.Time
-				}{
-					ID:        msg.ID,
-					Content:   msg.Content,
-					Sender:    msg.Sender,
-					Timestamp: msg.Timestamp,
-				})
-			}
-
-			return bridge.GenerateTextResponse(pkgCharacter, userMessage, pkgHistory)
+			return bridge.GenerateTextResponse(character, userMessage, history)
 		},
 		// TextToSpeech adapter
 		func(ctx context.Context, text string, voiceType string) ([]byte, error) {
@@ -208,7 +240,8 @@ func createAIServiceAdapter(bridge *ai.AIBridge) *service.AIServiceAdapter {
 		},
 		// SpeechToText adapter
 		func(ctx context.Context, sessionID string, audioData []byte) (string, string, error) {
-			return bridge.ProcessAudioChunk(ctx, sessionID, audioData)
+			transcript, _, err := bridge.SpeechToText(ctx, sessionID, audioData)
+			return transcript, "", err
 		},
 	)
 }
@@ -307,16 +340,12 @@ func setupBasicRoutes(mux *http.ServeMux, audioService *service.AudioService, ad
 
 // setupDatabase initializes the database connection and runs migrations
 func setupDatabase() (*gorm.DB, error) {
-	// Get database connection details from environment
-	host := os.Getenv("DB_HOST")
-	port := os.Getenv("DB_PORT")
-	user := os.Getenv("DB_USER")
-	password := os.Getenv("DB_PASSWORD")
-	dbname := os.Getenv("DB_NAME")
-
-	if host == "" || port == "" || user == "" || dbname == "" {
-		return nil, fmt.Errorf("missing required database configuration")
-	}
+	// Get database connection details from environment with defaults for local development
+	host := getEnvOrDefault("DB_HOST", "localhost")
+	port := getEnvOrDefault("DB_PORT", "5432")
+	user := getEnvOrDefault("DB_USER", "postgres")
+	password := getEnvOrDefault("DB_PASSWORD", "postgres")
+	dbname := getEnvOrDefault("DB_NAME", "character_demo")
 
 	dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
 		host, port, user, password, dbname)
@@ -338,4 +367,12 @@ func setupDatabase() (*gorm.DB, error) {
 
 	log.Println("Database migrations completed successfully")
 	return db, nil
+}
+
+// Helper function to get environment variable with default value
+func getEnvOrDefault(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
 }

@@ -35,10 +35,24 @@ func NewDB() (*gorm.DB, error) {
 		gormConfig.Logger = logger.Default.LogMode(logger.Error)
 	}
 
-	// Connect to database
-	db, err := gorm.Open(postgres.Open(dsn), gormConfig)
+	// Add retry mechanism
+	var db *gorm.DB
+	var err error
+	retries := 5
+	delay := 5 * time.Second
+
+	for i := 0; i < retries; i++ {
+		db, err = gorm.Open(postgres.Open(dsn), gormConfig)
+		if err == nil {
+			break
+		}
+
+		fmt.Printf("Failed to connect to database. Retrying in %v...\n", delay)
+		time.Sleep(delay)
+	}
+
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to database: %w", err)
+		return nil, fmt.Errorf("failed to connect to database after %d retries: %w", retries, err)
 	}
 
 	// Configure connection pool
