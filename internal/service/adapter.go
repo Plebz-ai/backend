@@ -294,7 +294,7 @@ func (s *AdapterService) ProcessAudioChunk(ctx context.Context, chunkID string) 
 			s.audioService.UpdateProcessingStatus(chunkID, "failed")
 			return "", nil, fmt.Errorf("response generation failed: %v", err)
 		}
-		
+
 		// Generate TTS for the response
 		audioResponse, err = s.aiBridge.TextToSpeech(ctx, textResponse, "default")
 		if err != nil {
@@ -409,9 +409,15 @@ func (s *AdapterService) ProcessAudioData(ctx context.Context, sessionID string,
 		}
 	} else {
 		// Fall back to generating response with the internal AI service
-		textResponse, audioResponse, err = s.aiBridge.ProcessTranscript(ctx, sessionID, transcript)
+		textResponse, err = s.aiBridge.ProcessTranscript(ctx, sessionID, transcript)
 		if err != nil {
 			return "", nil, fmt.Errorf("response generation failed: %v", err)
+		}
+
+		// Generate TTS for the response
+		audioResponse, err = s.aiBridge.TextToSpeech(ctx, textResponse, "default")
+		if err != nil {
+			log.Printf("Warning: Failed to generate speech for response: %v", err)
 		}
 	}
 

@@ -114,7 +114,7 @@ func New() *Config {
 		instance.Database.Port = getEnvString("DB_PORT", "5432")
 		instance.Database.User = getEnvString("DB_USER", "postgres")
 		instance.Database.Password = getEnvString("DB_PASSWORD", "postgres")
-		instance.Database.Name = getEnvString("DB_NAME", "character_demo")
+		instance.Database.Name = getEnvString("DB_NAME", "character-demo")
 		instance.Database.SSLMode = getEnvString("DB_SSL_MODE", "disable")
 		instance.Database.MaxConns = getEnvInt("DB_MAX_CONNS", 20)
 		instance.Database.Timeout = getEnvDuration("DB_TIMEOUT", 5*time.Second)

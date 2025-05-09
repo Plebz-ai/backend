@@ -63,26 +63,6 @@ type CreateStreamResponse struct {
 	Offer    map[string]string `json:"offer"`
 }
 
-// Message represents a chat message
-type Message struct {
-	ID        string    `json:"id"`
-	Sender    string    `json:"sender"`
-	Content   string    `json:"content"`
-	Timestamp time.Time `json:"timestamp"`
-}
-
-// Character represents a character in the system
-type Character struct {
-	ID          uint      `json:"id"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	Personality string    `json:"personality"`
-	VoiceType   string    `json:"voice_type"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
-	Custom      bool      `json:"custom"`
-}
-
 // AIResponse represents a response from the AI Layer
 type AIResponse struct {
 	Text     string `json:"text"`
@@ -108,7 +88,7 @@ func NewAIBridge() (*AIBridge, error) {
 	azureAPIKey := os.Getenv("AZURE_API_KEY")
 	azureModelName := os.Getenv("AZURE_MODEL_NAME")
 	if azureEndpoint == "" || azureAPIKey == "" {
-		return nil, fmt.Errorf("Azure LLama configuration missing: AZURE_LLAMA_ENDPOINT and AZURE_API_KEY are required")
+		return nil, fmt.Errorf("azure LLama configuration missing: AZURE_LLAMA_ENDPOINT and AZURE_API_KEY are required")
 	}
 	if azureModelName == "" {
 		azureModelName = "llama-2-13b-chat" // Default model name
@@ -117,13 +97,13 @@ func NewAIBridge() (*AIBridge, error) {
 	// Load ElevenLabs configuration
 	elevenLabsKey := os.Getenv("ELEVENLABS_API_KEY")
 	if elevenLabsKey == "" {
-		return nil, fmt.Errorf("ElevenLabs API key is required")
+		return nil, fmt.Errorf("elevenLabs API key is required")
 	}
 
 	// Load DeepGram configuration
 	deepgramAPIKey := os.Getenv("DEEPGRAM_API_KEY")
 	if deepgramAPIKey == "" {
-		return nil, fmt.Errorf("DeepGram API key is required for speech-to-text")
+		return nil, fmt.Errorf("deepGram API key is required for speech-to-text")
 	}
 
 	return &AIBridge{
@@ -195,7 +175,7 @@ func (b *AIBridge) InitAvatarStream(sessionID string, avatarURL string) error {
 }
 
 // ProcessAudioChunk processes an audio chunk through the AI Layer
-func (b *AIBridge) ProcessAudioChunk(ctx context.Context, sessionID string, audioData []byte) (string, string, error) {
+func (b *AIBridge) ProcessAudioChunk(_ context.Context, sessionID string, audioData []byte) (string, string, error) {
 	// Check if session exists
 	b.contextMutex.Lock()
 	sessionContext, exists := b.sessionContexts[sessionID]
@@ -217,13 +197,13 @@ func (b *AIBridge) ProcessAudioChunk(ctx context.Context, sessionID string, audi
 	log.Printf("Processing audio chunk for session %s, audio size: %d bytes", sessionID, len(audioData))
 
 	// Transcribe audio using DeepGram
-	transcript, err := b.DeepGramSpeechToText(ctx, audioData)
+	transcript, err := b.DeepGramSpeechToText(context.Background(), audioData)
 	if err != nil {
 		return "", "", fmt.Errorf("speech-to-text failed: %v", err)
 	}
 
 	// Generate AI response
-	aiResponse, err := b.ProcessTranscript(ctx, sessionID, transcript)
+	aiResponse, err := b.ProcessTranscript(context.Background(), sessionID, transcript)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to generate AI response: %v", err)
 	}
@@ -232,11 +212,11 @@ func (b *AIBridge) ProcessAudioChunk(ctx context.Context, sessionID string, audi
 }
 
 // DeepGramSpeechToText converts speech to text using DeepGram API
-func (b *AIBridge) DeepGramSpeechToText(ctx context.Context, audioData []byte) (string, error) {
+func (b *AIBridge) DeepGramSpeechToText(_ context.Context, audioData []byte) (string, error) {
 	url := "https://api.deepgram.com/v1/listen?model=nova-2&language=en&smart_format=true&punctuate=true"
 
 	// Create request
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(audioData))
+	req, err := http.NewRequest("POST", url, bytes.NewReader(audioData))
 	if err != nil {
 		return "", fmt.Errorf("failed to create DeepGram request: %v", err)
 	}
@@ -248,14 +228,14 @@ func (b *AIBridge) DeepGramSpeechToText(ctx context.Context, audioData []byte) (
 	// Send request
 	resp, err := b.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("DeepGram API request failed: %v", err)
+		return "", fmt.Errorf("deepGram API request failed: %v", err)
 	}
 	defer resp.Body.Close()
 
 	// Check response
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("DeepGram API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+		return "", fmt.Errorf("deepGram API returned status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	// Parse response
@@ -283,7 +263,7 @@ func (b *AIBridge) DeepGramSpeechToText(ctx context.Context, audioData []byte) (
 }
 
 // ProcessTranscript processes a transcript through the LLama model
-func (b *AIBridge) ProcessTranscript(ctx context.Context, sessionID string, transcript string) (string, error) {
+func (b *AIBridge) ProcessTranscript(_ context.Context, sessionID string, transcript string) (string, error) {
 	b.contextMutex.Lock()
 	sessionContext, exists := b.sessionContexts[sessionID]
 	if !exists {
@@ -302,7 +282,6 @@ func (b *AIBridge) ProcessTranscript(ctx context.Context, sessionID string, tran
 	sessionContext.Messages = append(sessionContext.Messages, userMessage)
 
 	// Get character info from session context
-	characterID := sessionContext.CharacterID
 	isCustom := sessionContext.CustomCharacter
 	b.contextMutex.Unlock()
 
@@ -312,10 +291,10 @@ func (b *AIBridge) ProcessTranscript(ctx context.Context, sessionID string, tran
 
 	if isCustom {
 		// Use custom character pipeline with prompt chaining
-		textResponse, err = b.generateCustomCharacterResponse(ctx, sessionID, transcript)
+		textResponse, err = b.generateCustomCharacterResponse(context.Background(), sessionID, transcript)
 	} else {
 		// Use predefined character pipeline
-		textResponse, err = b.generatePredefinedCharacterResponse(ctx, sessionID, transcript)
+		textResponse, err = b.generatePredefinedCharacterResponse(context.Background(), sessionID, transcript)
 	}
 
 	if err != nil {
@@ -537,7 +516,7 @@ func (b *AIBridge) callAzureLLama(messages []map[string]string) (string, error) 
 	// Check response status
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("Azure API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+		return "", fmt.Errorf("azure API returned status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	// Parse response
@@ -598,7 +577,7 @@ func (b *AIBridge) getCharacterByID(characterID uint) (*Character, error) {
 }
 
 // TextToSpeech converts text to speech using ElevenLabs
-func (b *AIBridge) TextToSpeech(ctx context.Context, text string, voiceType string) ([]byte, error) {
+func (b *AIBridge) TextToSpeech(_ context.Context, text string, voiceType string) ([]byte, error) {
 	voiceID := b.getVoiceIDForType(voiceType)
 	url := fmt.Sprintf("https://api.elevenlabs.io/v1/text-to-speech/%s", voiceID)
 
@@ -615,43 +594,50 @@ func (b *AIBridge) TextToSpeech(ctx context.Context, text string, voiceType stri
 		VoiceSettings: struct {
 			Stability       float64 `json:"stability"`
 			SimilarityBoost float64 `json:"similarity_boost"`
+		}(struct {
+			Stability       float64
+			SimilarityBoost float64
 		}{
-			Stability:       0.75,
-			SimilarityBoost: 0.75,
-		},
+			Stability:       0.8,
+			SimilarityBoost: 0.8,
+		}),
 	}
 
 	jsonData, err := json.Marshal(requestBody)
 	if err != nil {
-		return nil, fmt.Errorf("error marshaling TTS request: %v", err)
+		return nil, fmt.Errorf("failed to marshal text-to-speech request: %v", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
+	// Create request
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
-		return nil, fmt.Errorf("error creating TTS request: %v", err)
+		return nil, fmt.Errorf("failed to create text-to-speech request: %v", err)
 	}
 
+	// Set headers
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("xi-api-key", b.elevenLabsKey)
-	req.Header.Set("Accept", "audio/mpeg")
+	req.Header.Set("Authorization", "Bearer "+b.elevenLabsKey)
 
+	// Send request
 	resp, err := b.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("error making TTS API request: %v", err)
+		return nil, fmt.Errorf("failed to send text-to-speech request: %v", err)
 	}
 	defer resp.Body.Close()
 
+	// Check response status
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("TTS API request failed with status code %d: %s", resp.StatusCode, string(bodyBytes))
+		return nil, fmt.Errorf("ElevenLabs API returned status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
-	audioData, err := io.ReadAll(resp.Body)
+	// Read response body
+	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("error reading TTS response body: %v", err)
+		return nil, fmt.Errorf("failed to read text-to-speech response: %v", err)
 	}
 
-	return audioData, nil
+	return bodyBytes, nil
 }
 
 // getVoiceIDForType maps voice type to ElevenLabs voice ID
@@ -667,40 +653,6 @@ func (b *AIBridge) getVoiceIDForType(voiceType string) string {
 	default:
 		return "21m00Tcm4TlvDq8ikWAM" // Default to Rachel
 	}
-}
-
-// SendAudioToAvatar sends the generated audio to the avatar animation service
-func (b *AIBridge) SendAudioToAvatar(sessionID string, audioData []byte) error {
-	b.avatarMutex.Lock()
-	streamID, exists := b.avatarStreams[sessionID]
-	b.avatarMutex.Unlock()
-
-	if !exists {
-		return fmt.Errorf("no active avatar stream for session: %s", sessionID)
-	}
-
-	// Create a new request to send audio to the avatar stream
-	url := fmt.Sprintf("%s/avatar/talk_stream?stream_id=%s", b.aiLayerURL, streamID)
-
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(audioData))
-	if err != nil {
-		return fmt.Errorf("error creating avatar audio request: %v", err)
-	}
-
-	req.Header.Set("Content-Type", "audio/wav")
-
-	resp, err := b.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("error sending audio to avatar: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("avatar audio request failed with status code %d: %s", resp.StatusCode, string(bodyBytes))
-	}
-
-	return nil
 }
 
 // CleanupSession removes a session and its WebSocket connection
@@ -719,7 +671,7 @@ func (b *AIBridge) CleanupSession(sessionID string) {
 		url := fmt.Sprintf("%s/avatar/stop_stream?stream_id=%s", b.aiLayerURL, streamID)
 		_, err := b.httpClient.Post(url, "application/json", nil)
 		if err != nil {
-			log.Printf("Error stopping avatar stream: %v", err)
+			log.Printf("error stopping avatar stream: %v", err)
 		}
 		delete(b.avatarStreams, sessionID)
 	}
@@ -928,12 +880,4 @@ func (b *AIBridge) GenerateTextResponse(character interface{}, userMessage strin
 	// Process the message through appropriate pipeline
 	response, err := b.ProcessTranscript(context.Background(), sessionID, userMessage)
 	return response, err
-}
-
-// Helper function to avoid panic with string substring
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

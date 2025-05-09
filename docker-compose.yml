@@ -6,40 +6,58 @@ services:
     ports:
       - "8082:8082"
     environment:
-      - AI_SERVICE_URL=http://ai_layer:8000
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - DB_NAME=character-demo
+      - AI_SERVICE_URL=http://ai_layer:5000
+      - REDIS_URL=redis:6379
     depends_on:
-      - ai_layer
+      - postgres
       - redis
+      - ai_layer
     networks:
-      - ai_network
+      - backend_network
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=character-demo
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - backend_network
+
+  redis:
+    image: redis:8.0-alpine
+    ports:
+      - "6379:6379"
+    networks:
+      - backend_network
 
   ai_layer:
-    build: 
+    build:
       context: ../AI_Layer2
+      dockerfile: Dockerfile
     environment:
       - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
-      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
       - AZURE_LLAMA_ENDPOINT=${AZURE_LLAMA_ENDPOINT}
       - AZURE_API_KEY=${AZURE_API_KEY}
       - AZURE_MODEL_NAME=${AZURE_MODEL_NAME}
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
-    networks:
-      - ai_network
-
-  redis:
-    image: redis:alpine
     ports:
-      - "6379:6379"
-    command: redis-server --requirepass ${REDIS_PASSWORD}
+      - "5000:5000"
     networks:
-      - ai_network
+      - backend_network
 
 networks:
-  ai_network:
+  backend_network:
     driver: bridge
+
+volumes:
+  postgres_data:
