@@ -44,6 +44,7 @@ func (s *CharacterService) CreateCharacter(req *models.CreateCharacterRequest) (
 		AvatarURL:   req.AvatarURL,
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
+		IsCustom:    req.IsCustom,
 	}
 
 	result := s.db.Create(character)

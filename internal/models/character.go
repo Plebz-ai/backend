@@ -16,6 +16,7 @@ type Character struct {
 	AvatarURL   string    `json:"avatar_url"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+	IsCustom    bool      `json:"is_custom" gorm:"default:false"`
 }
 
 type CreateCharacterRequest struct {
@@ -24,4 +25,5 @@ type CreateCharacterRequest struct {
 	Personality string `json:"personality" binding:"required"`
 	VoiceType   string `json:"voice_type" binding:"required"`
 	AvatarURL   string `json:"avatar_url"`
+	IsCustom    bool   `json:"is_custom"`
 }

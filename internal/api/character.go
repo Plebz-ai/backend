@@ -49,6 +49,13 @@ func (h *CharacterHandler) CreateCharacter(c *gin.Context) {
 		req.Description = c.PostForm("description")
 		req.Personality = c.PostForm("personality")
 		req.VoiceType = c.PostForm("voice_type")
+		// Read is_custom from form (if present)
+		isCustomStr := c.PostForm("is_custom")
+		if isCustomStr == "true" || isCustomStr == "1" {
+			req.IsCustom = true
+		} else {
+			req.IsCustom = false
+		}
 
 		// First try to process base64 encoded avatar if available
 		base64Image := c.PostForm("avatar_base64")
@@ -136,6 +143,10 @@ func (h *CharacterHandler) CreateCharacter(c *gin.Context) {
 			log.Printf("Error binding JSON: %v", err)
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
+		}
+		// Ensure IsCustom is set (default false if not present)
+		if !req.IsCustom {
+			req.IsCustom = false
 		}
 	}
 
