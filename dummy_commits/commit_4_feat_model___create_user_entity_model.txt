@@ -1,8 +1,0 @@
-Commit: feat(model): create user entity model
-Date: 2025-01-27
-Description: Backend development task for the AI Character Platform.
-
-Changes made:
-- Updated Go code for backend services
-- Improved API handling
-- Enhanced performance

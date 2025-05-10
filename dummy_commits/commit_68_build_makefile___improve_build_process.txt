@@ -1,8 +1,0 @@
-Commit: build(makefile): improve build process
-Date: 2025-03-16
-Description: Backend development task for the AI Character Platform.
-
-Changes made:
-- Updated Go code for backend services
-- Improved API handling
-- Enhanced performance

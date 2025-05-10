@@ -30,10 +30,9 @@ const (
 )
 
 var upgrader = websocket.Upgrader{
-	// Restrict CheckOrigin to allow only trusted origins
+	// Allow all origins for local development
 	CheckOrigin: func(r *http.Request) bool {
-		origin := r.Header.Get("Origin")
-		return origin == "http://localhost:3000" || origin == "https://your-production-domain.com"
+		return true
 	},
 	HandshakeTimeout: 10 * time.Second,
 	ReadBufferSize:   1024,

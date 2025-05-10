@@ -1,8 +1,0 @@
-Commit: test(handler): add user API endpoint tests
-Date: 2025-03-04
-Description: Backend development task for the AI Character Platform.
-
-Changes made:
-- Updated Go code for backend services
-- Improved API handling
-- Enhanced performance
