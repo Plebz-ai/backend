@@ -185,7 +185,37 @@ func main() {
 		// Audio (protected)
 		apiLegacy.POST("/audio/upload", legacyJWT, audioHandler.UploadAudio)
 		apiLegacy.GET("/audio/session/:sessionId", legacyJWT, audioHandler.GetSessionAudio)
+
+		// Forgot Password (stub)
+		apiLegacy.POST("/forgot-password", func(c *gin.Context) {
+			c.JSON(200, gin.H{"message": "Password reset link sent (stub)."})
+		})
+
+		// Video Call (stub)
+		apiLegacy.GET("/video-call/:id", func(c *gin.Context) {
+			c.JSON(501, gin.H{"error": "Video call signaling not implemented in backend stub."})
+		})
+
+		// Build/Design/Add/Setup/Implement (stubs)
+		apiLegacy.GET("/build", func(c *gin.Context) { c.JSON(501, gin.H{"error": "Not implemented (stub)"}) })
+		apiLegacy.POST("/build", func(c *gin.Context) { c.JSON(501, gin.H{"error": "Not implemented (stub)"}) })
+		apiLegacy.GET("/design", func(c *gin.Context) { c.JSON(501, gin.H{"error": "Not implemented (stub)"}) })
+		apiLegacy.POST("/design", func(c *gin.Context) { c.JSON(501, gin.H{"error": "Not implemented (stub)"}) })
+		apiLegacy.GET("/add", func(c *gin.Context) { c.JSON(501, gin.H{"error": "Not implemented (stub)"}) })
+		apiLegacy.POST("/add", func(c *gin.Context) { c.JSON(501, gin.H{"error": "Not implemented (stub)"}) })
+		apiLegacy.GET("/setup", func(c *gin.Context) { c.JSON(501, gin.H{"error": "Not implemented (stub)"}) })
+		apiLegacy.POST("/setup", func(c *gin.Context) { c.JSON(501, gin.H{"error": "Not implemented (stub)"}) })
+		apiLegacy.GET("/implement", func(c *gin.Context) { c.JSON(501, gin.H{"error": "Not implemented (stub)"}) })
+		apiLegacy.POST("/implement", func(c *gin.Context) { c.JSON(501, gin.H{"error": "Not implemented (stub)"}) })
 	}
+
+	// Catch-all for unhandled /api/* routes
+	ginEngine.NoRoute(func(c *gin.Context) {
+		if len(c.Request.URL.Path) >= 5 && c.Request.URL.Path[:5] == "/api/" {
+			c.JSON(404, gin.H{"error": "API endpoint not found", "path": c.Request.URL.Path})
+			return
+		}
+	})
 
 	// Get the port from the environment
 	port := os.Getenv("PORT")

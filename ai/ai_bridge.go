@@ -36,7 +36,7 @@ func NewAIBridge() (*AIBridge, error) {
 
 // ChatRequest is the payload for text-based chat
 type ChatRequest struct {
-	CharacterID uint   `json:"characterId"`
+	CharacterID uint   `json:"character_id"`
 	Content     string `json:"content"`
 }
 
@@ -71,7 +71,7 @@ func (b *AIBridge) GenerateTextResponse(
 
 // STTRequest is the payload for speech-to-text
 type STTRequest struct {
-	AudioData string `json:"audioData"`
+	AudioData string `json:"audio_data"`
 }
 
 // STTResponse is the transcript from the AI service
@@ -102,7 +102,7 @@ func (b *AIBridge) SpeechToText(ctx context.Context, sessionID string, audioData
 // TTSRequest is the payload for text-to-speech
 type TTSRequest struct {
 	Text      string `json:"text"`
-	VoiceName string `json:"voiceName"`
+	VoiceName string `json:"voice_name"`
 }
 
 // TTSResponse is the base64-encoded audio from the AI service
