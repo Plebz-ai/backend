@@ -29,7 +29,7 @@ func NewAIBridge() (*AIBridge, error) {
 		baseURL = "http://localhost:5000"
 	}
 	return &AIBridge{
-		client:  &http.Client{Timeout: 10 * time.Second},
+		client:  &http.Client{Timeout: 60 * time.Second},
 		baseURL: baseURL,
 	}, nil
 }

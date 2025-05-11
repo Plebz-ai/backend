@@ -30,10 +30,9 @@ const (
 )
 
 var upgrader = websocket.Upgrader{
-	// Restrict CheckOrigin to allow only trusted origins
+	// Allow all origins for local/demo
 	CheckOrigin: func(r *http.Request) bool {
-		origin := r.Header.Get("Origin")
-		return origin == "http://localhost:3000" || origin == "https://your-production-domain.com"
+		return true
 	},
 	HandshakeTimeout: 10 * time.Second,
 	ReadBufferSize:   1024,
@@ -58,6 +57,8 @@ type Client struct {
 	messagesMu sync.Mutex
 	messages   []ChatMessage // Store conversation history
 	SessionID  string        // Optional session ID for persistent conversations
+	closed     bool          // Add closed flag
+	mu         sync.Mutex    // Add mutex for closed flag
 }
 
 type Message struct {
@@ -110,6 +111,7 @@ type Hub struct {
 	messageService   MessageService
 	audioService     interface{}
 	mu               sync.Mutex
+	undelivered      map[string][]Message // Buffer for undelivered messages
 }
 
 func NewHub(characterService CharacterService, aiService AIService, messageService MessageService) *Hub {
@@ -122,6 +124,7 @@ func NewHub(characterService CharacterService, aiService AIService, messageServi
 		aiService:        aiService,
 		messageService:   messageService,
 		audioService:     nil, // Will be set later if available
+		undelivered:      make(map[string][]Message),
 	}
 }
 
@@ -156,7 +159,12 @@ func (h *Hub) Run() {
 			h.mu.Lock()
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
-				close(client.Send)
+				client.mu.Lock()
+				if !client.closed {
+					client.closed = true
+					close(client.Send)
+				}
+				client.mu.Unlock()
 				log.Printf("Client unregistered: %s", client.ID)
 			}
 			h.mu.Unlock()
@@ -180,7 +188,14 @@ func (h *Hub) Run() {
 // Improve error logging and cleanup in ReadPump
 func (c *Client) ReadPump() {
 	defer func() {
+		log.Printf("[ReadPump] Unregistering client: %s, session: %s", c.ID, c.SessionID)
 		c.Hub.unregister <- c
+		c.mu.Lock()
+		if !c.closed {
+			c.closed = true
+			close(c.Send)
+		}
+		c.mu.Unlock()
 		c.Conn.Close()
 		log.Printf("ReadPump ended for client: %s, session: %s", c.ID, c.SessionID)
 	}()
@@ -195,8 +210,9 @@ func (c *Client) ReadPump() {
 	for {
 		_, messageData, err := c.Conn.ReadMessage()
 		if err != nil {
+			log.Printf("[ReadPump] Exiting for client %s, session %s: %v", c.ID, c.SessionID, err)
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("Unexpected WebSocket close error for client %s, session %s: %v", c.ID, c.SessionID, err)
+				log.Printf("[ReadPump] Unexpected WebSocket close error for client %s, session %s: %v", c.ID, c.SessionID, err)
 			}
 			break
 		}
@@ -204,7 +220,7 @@ func (c *Client) ReadPump() {
 		// Parse the message data into a Message struct
 		var msg Message
 		if err := json.Unmarshal(messageData, &msg); err != nil {
-			log.Printf("Error unmarshaling message: %v", err)
+			log.Printf("[ReadPump] Error unmarshaling message: %v", err)
 			c.sendErrorMessage("Invalid message format")
 			continue
 		}
@@ -212,9 +228,11 @@ func (c *Client) ReadPump() {
 		// Handle message in a separate goroutine
 		go c.handleMessage(msg)
 	}
+	log.Printf("[ReadPump] Loop exited for client %s, session %s", c.ID, c.SessionID)
 }
 
 func (c *Client) handleMessage(message Message) {
+	log.Printf("[DEBUG] handleMessage called: type=%s, content=%+v", message.Type, message.Content)
 	// Add recovery to prevent crashes from panics in message handlers
 	defer func() {
 		if r := recover(); r != nil {
@@ -340,7 +358,15 @@ func (c *Client) handleChatMessage(message Message) {
 		c.messages = append(c.messages, characterMessage)
 		c.messagesMu.Unlock()
 
-		c.sendMessage("chat", characterMessage)
+		sent := c.sendMessageWithAck("chat", characterMessage)
+		if !sent {
+			// Buffer the message for later delivery
+			bufferKey := c.SessionID + ":" + c.ID
+			c.Hub.mu.Lock()
+			c.Hub.undelivered[bufferKey] = append(c.Hub.undelivered[bufferKey], Message{Type: "chat", Content: characterMessage})
+			c.Hub.mu.Unlock()
+			log.Printf("[BUFFER] Buffered undelivered message for %s", bufferKey)
+		}
 	}()
 }
 
@@ -764,6 +790,13 @@ func (c *Client) handleStreamConfigMessage(message Message) {
 }
 
 func (c *Client) sendMessage(messageType string, content interface{}) {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		log.Printf("[WARN] Tried to send on closed channel for client %s", c.ID)
+		return
+	}
+	c.mu.Unlock()
 	message := Message{
 		Type:    messageType,
 		Content: content,
@@ -785,7 +818,6 @@ func (c *Client) sendMessage(messageType string, content interface{}) {
 			messageType, len(messageJSON), logPreview)
 	}
 
-	// Protect against concurrent writes to the WebSocket
 	c.Hub.mu.Lock()
 	defer c.Hub.mu.Unlock()
 
@@ -795,7 +827,12 @@ func (c *Client) sendMessage(messageType string, content interface{}) {
 	default:
 		// Send channel is full or closed
 		log.Printf("Failed to send message to client %s: channel full or closed", c.ID)
-		// Attempt to close connection and unregister client
+		c.mu.Lock()
+		if !c.closed {
+			c.closed = true
+			close(c.Send)
+		}
+		c.mu.Unlock()
 		c.Hub.unregister <- c
 	}
 }
@@ -828,37 +865,25 @@ func (c *Client) WritePump() {
 		case message, ok := <-c.Send:
 			c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
+				log.Printf("[WritePump] Send channel closed for client %s", c.ID)
 				// The hub closed the channel.
 				c.Conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
-
-			w, err := c.Conn.NextWriter(websocket.TextMessage)
-			if err != nil {
-				log.Printf("Error getting next writer: %v", err)
-				return
-			}
-			w.Write(message)
-
-			// Add queued chat messages to the current websocket message.
-			n := len(c.Send)
-			for i := 0; i < n; i++ {
-				w.Write([]byte{'\n'})
-				w.Write(<-c.Send)
-			}
-
-			if err := w.Close(); err != nil {
-				log.Printf("Error closing writer: %v", err)
+			// Send each message as a separate WebSocket frame
+			if err := c.Conn.WriteMessage(websocket.TextMessage, message); err != nil {
+				log.Printf("[WritePump] Error writing message: %v", err)
 				return
 			}
 		case <-ticker.C:
 			c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.Conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				log.Printf("Error sending ping: %v", err)
+				log.Printf("[WritePump] Error sending ping: %v", err)
 				return
 			}
 		}
 	}
+	log.Printf("[WritePump] Loop exited for client %s", c.ID)
 }
 
 // Improve logging for WebSocket connections
@@ -885,18 +910,20 @@ func ServeWs(hub *Hub, c *gin.Context) {
 		sessionID = fmt.Sprintf("session-%s-%s-%d", charID, clientID, time.Now().Unix())
 	}
 
-	// Parse character ID
-	charIDUint, err := strconv.ParseUint(charID, 10, 64)
+	// Try to parse character ID as uint, fallback to 1 (Elon Musk) if not numeric
+	var charIDUint uint64
+	var err error
+	charIDUint, err = strconv.ParseUint(charID, 10, 64)
 	if err != nil {
-		log.Printf("Invalid character ID: %v", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid characterId: %v", err)})
-		return
+		log.Printf("Non-numeric character ID '%s', using fallback character 1 (Elon Musk)", charID)
+		charIDUint = 1
 	}
 
 	// Upgrade the connection
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		log.Printf("Error upgrading connection: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("WebSocket upgrade failed: %v", err)})
 		return
 	}
 
@@ -929,12 +956,82 @@ func ServeWs(hub *Hub, c *gin.Context) {
 			client.sendMessage("chat_history", map[string]interface{}{
 				"messages": previousMessages,
 			})
+			log.Printf("[DEBUG] Sent chat history to client %s, session %s. About to start ReadPump/WritePump.", client.ID, client.SessionID)
 		}
 	}
 
 	client.Hub.register <- client
 
-	// Start the client's message pumps
-	go client.WritePump()
-	go client.ReadPump()
+	// After registering client and before starting ReadPump/WritePump:
+	connectedMsg := map[string]interface{}{"type": "connected"}
+	msgBytes, _ := json.Marshal(connectedMsg)
+	select {
+	case client.Send <- msgBytes:
+		log.Printf("[DEBUG] Sent 'connected' message to client %s", client.ID)
+	default:
+		log.Printf("[ERROR] Could not send 'connected' message to client %s", client.ID)
+	}
+
+	// Send any buffered undelivered messages for this session/client
+	bufferKey := client.SessionID + ":" + client.ID
+	hub.mu.Lock()
+	if msgs, ok := hub.undelivered[bufferKey]; ok {
+		for _, msg := range msgs {
+			client.sendMessage(msg.Type, msg.Content)
+		}
+		delete(hub.undelivered, bufferKey)
+	}
+	hub.mu.Unlock()
+
+	// Start the client's message pumps with panic recovery
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("PANIC in WritePump for client %s: %v", client.ID, r)
+			}
+		}()
+		client.WritePump()
+	}()
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("PANIC in ReadPump for client %s: %v", client.ID, r)
+			}
+		}()
+		client.ReadPump()
+	}()
+}
+
+// sendMessageWithAck tries to send a message and returns true if successful, false if channel is closed
+func (c *Client) sendMessageWithAck(messageType string, content interface{}) bool {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		log.Printf("[WARN] Tried to send on closed channel for client %s", c.ID)
+		return false
+	}
+	c.mu.Unlock()
+	message := Message{
+		Type:    messageType,
+		Content: content,
+	}
+	messageJSON, err := json.Marshal(message)
+	if err != nil {
+		log.Printf("Error marshaling message: %v", err)
+		return false
+	}
+	select {
+	case c.Send <- messageJSON:
+		return true
+	default:
+		log.Printf("Failed to send message to client %s: channel full or closed", c.ID)
+		c.mu.Lock()
+		if !c.closed {
+			c.closed = true
+			close(c.Send)
+		}
+		c.mu.Unlock()
+		c.Hub.unregister <- c
+		return false
+	}
 }
