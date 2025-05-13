@@ -9,7 +9,7 @@ import (
 
 	"ai-agent-character-demo/backend/ai"
 	"ai-agent-character-demo/backend/internal/models"
-	"ai-agent-character-demo/backend/internal/ws"
+	ws "ai-agent-character-demo/backend/pkg/ws"
 
 	"gorm.io/gorm"
 )
@@ -27,7 +27,7 @@ func NewCharacterServiceAdapter(service *CharacterService) *CharacterServiceAdap
 }
 
 // GetCharacter implements the ws.CharacterService interface
-func (a *CharacterServiceAdapter) GetCharacter(id uint) (*ws.Character, error) {
+func (a *CharacterServiceAdapter) GetCharacter(id uint, userID string) (*ws.Character, error) {
 	character, err := a.service.GetCharacter(id)
 	if err != nil {
 		return nil, err
@@ -39,8 +39,6 @@ func (a *CharacterServiceAdapter) GetCharacter(id uint) (*ws.Character, error) {
 		Description: character.Description,
 		Personality: character.Personality,
 		VoiceType:   character.VoiceType,
-		CreatedAt:   character.CreatedAt,
-		UpdatedAt:   character.UpdatedAt,
 	}, nil
 }
 
@@ -282,8 +280,6 @@ func (s *AdapterService) ProcessAudioChunk(ctx context.Context, chunkID string) 
 		Description: character.Description,
 		Personality: character.Personality,
 		VoiceType:   character.VoiceType,
-		CreatedAt:   character.CreatedAt,
-		UpdatedAt:   character.UpdatedAt,
 	}
 	// Optionally, fetch conversation history if needed
 	var history []ws.ChatMessage
@@ -386,8 +382,6 @@ func (s *AdapterService) ProcessAudioData(ctx context.Context, sessionID string,
 		Description: character.Description,
 		Personality: character.Personality,
 		VoiceType:   character.VoiceType,
-		CreatedAt:   character.CreatedAt,
-		UpdatedAt:   character.UpdatedAt,
 	}
 	var history []ws.ChatMessage
 	textResponse, err := s.aiBridge.GenerateTextResponse(wsChar, transcript, history)

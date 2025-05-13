@@ -5,9 +5,9 @@ import (
 	"ai-agent-character-demo/backend/internal/api"
 	"ai-agent-character-demo/backend/internal/models"
 	"ai-agent-character-demo/backend/internal/service"
-	"ai-agent-character-demo/backend/internal/ws"
 	"ai-agent-character-demo/backend/pkg/jwt"
 	"ai-agent-character-demo/backend/pkg/logger"
+	ws "ai-agent-character-demo/backend/pkg/ws"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -19,6 +19,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	internalws "ai-agent-character-demo/backend/internal/ws"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -95,7 +97,7 @@ func main() {
 	aiServiceAdapter := createAIServiceAdapter(bridge)
 
 	// Create WebSocket hub
-	hub := ws.NewHub(
+	hub := internalws.NewHub(
 		characterServiceAdapter,
 		aiServiceAdapter,
 		messageServiceAdapter,
@@ -109,7 +111,7 @@ func main() {
 
 	// Set up WebSocket route
 	ginEngine.GET("/ws", func(c *gin.Context) {
-		ws.ServeWs(hub, c)
+		internalws.ServeWs(hub, c)
 	})
 
 	// Initialize controllers for legacy and v1 routes

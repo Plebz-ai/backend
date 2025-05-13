@@ -144,10 +144,8 @@ func (h *CharacterHandler) CreateCharacter(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		// Ensure IsCustom is set (default false if not present)
-		if !req.IsCustom {
-			req.IsCustom = false
-		}
+		// Ensure IsCustom is set to true for all custom character creation
+		req.IsCustom = true
 	}
 
 	// Validate required fields
@@ -204,6 +202,10 @@ func (h *CharacterHandler) ListCharacters(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+
+	if characters == nil {
+		characters = []models.Character{}
 	}
 
 	c.JSON(http.StatusOK, characters)

@@ -10,8 +10,8 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"ai-agent-character-demo/backend/internal/service"
-	"ai-agent-character-demo/backend/internal/ws"
 	"ai-agent-character-demo/backend/pkg/jwt"
+	ws "ai-agent-character-demo/backend/pkg/ws"
 )
 
 // MessageController handles message-related API endpoints
@@ -360,8 +360,6 @@ func (c *MessageController) SendMessage(ctx *gin.Context) {
 		Description: character.Description,
 		Personality: character.Personality,
 		VoiceType:   character.VoiceType,
-		CreatedAt:   character.CreatedAt,
-		UpdatedAt:   character.UpdatedAt,
 	}
 
 	dbMessages, err := c.messageService.GetSessionMessages(request.CharacterID, request.SessionID)

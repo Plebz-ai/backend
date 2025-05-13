@@ -130,6 +130,7 @@ func JWTAuthMiddleware(jwtService *jwt.Service, logger *logger.Logger) gin.Handl
 
 		// Add claims to context
 		c.Set("claims", claims)
+		c.Set("userId", claims.UserID)
 		c.Set("userID", claims.UserID)
 		c.Set("userRole", claims.Role)
 

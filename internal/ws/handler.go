@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	ws "ai-agent-character-demo/backend/pkg/ws"
+
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 )
@@ -39,14 +41,6 @@ var upgrader = websocket.Upgrader{
 	WriteBufferSize:  1024,
 }
 
-// ChatMessage represents a message in the conversation
-type ChatMessage struct {
-	ID        string    `json:"id"`
-	Sender    string    `json:"sender"`
-	Content   string    `json:"content"`
-	Timestamp time.Time `json:"timestamp"`
-}
-
 type Client struct {
 	ID         string
 	Conn       *websocket.Conn
@@ -55,10 +49,10 @@ type Client struct {
 	Hub        *Hub
 	UserID     string // Optional for authentication
 	messagesMu sync.Mutex
-	messages   []ChatMessage // Store conversation history
-	SessionID  string        // Optional session ID for persistent conversations
-	closed     bool          // Add closed flag
-	mu         sync.Mutex    // Add mutex for closed flag
+	messages   []ws.ChatMessage // Store conversation history
+	SessionID  string           // Optional session ID for persistent conversations
+	closed     bool             // Add closed flag
+	mu         sync.Mutex       // Add mutex for closed flag
 }
 
 type Message struct {
@@ -68,37 +62,25 @@ type Message struct {
 
 // CharacterService defines the interface for character operations
 type CharacterService interface {
-	GetCharacter(id uint) (*Character, error)
+	GetCharacter(id uint, userID string) (*ws.Character, error)
 }
 
 // AIService defines the interface for AI operations
 type AIService interface {
-	GenerateResponse(character *Character, userMessage string, conversationHistory []ChatMessage) (string, error)
+	GenerateResponse(character *ws.Character, userMessage string, conversationHistory []ws.ChatMessage) (string, error)
 	TextToSpeech(ctx context.Context, text string, voiceType string) ([]byte, error)
 	SpeechToText(ctx context.Context, sessionID string, audioData []byte) (string, string, error)
 }
 
 // MessageService defines the interface for message persistence operations
 type MessageService interface {
-	SaveMessage(characterID uint, sessionID string, message *ChatMessage) error
-	GetSessionMessages(characterID uint, sessionID string) ([]ChatMessage, error)
+	SaveMessage(characterID uint, sessionID string, message *ws.ChatMessage) error
+	GetSessionMessages(characterID uint, sessionID string) ([]ws.ChatMessage, error)
 }
 
 // AudioService interface for audio storage
 type AudioService interface {
 	StoreAudioChunk(userID string, sessionID string, charID uint, audioData []byte, format string, duration float64, sampleRate int, channels int, metadata string, ttl time.Duration) (string, error)
-}
-
-// Character represents a character in the system
-type Character struct {
-	ID          uint      `json:"id"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	Personality string    `json:"personality"`
-	VoiceType   string    `json:"voice_type"`
-	AvatarURL   string    `json:"avatar_url"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 type Hub struct {
@@ -301,7 +283,7 @@ func (c *Client) handleChatMessage(message Message) {
 		chatContent.ID = fmt.Sprintf("msg-%d", time.Now().UnixNano())
 	}
 
-	userMessage := ChatMessage{
+	userMessage := ws.ChatMessage{
 		ID:        chatContent.ID,
 		Sender:    "user",
 		Content:   chatContent.Content,
@@ -331,7 +313,7 @@ func (c *Client) handleChatMessage(message Message) {
 
 	go func() {
 		// Get character first
-		character, err := c.Hub.characterService.GetCharacter(c.CharID)
+		character, err := c.Hub.characterService.GetCharacter(c.CharID, c.UserID)
 		if err != nil {
 			log.Printf("Error fetching character: %v", err)
 			c.sendErrorMessage("Failed to fetch character information")
@@ -347,7 +329,7 @@ func (c *Client) handleChatMessage(message Message) {
 
 		log.Printf("Generated AI response: %s", aiResponse)
 
-		characterMessage := ChatMessage{
+		characterMessage := ws.ChatMessage{
 			ID:        fmt.Sprintf("resp-%d", time.Now().UnixNano()),
 			Sender:    "character",
 			Content:   aiResponse,
@@ -530,7 +512,7 @@ func (c *Client) handleAudioMessage(message Message) {
 	}
 
 	// Create a message from the speech
-	userMessage := ChatMessage{
+	userMessage := ws.ChatMessage{
 		ID:        fmt.Sprintf("speech-%d", time.Now().UnixNano()),
 		Sender:    "user",
 		Content:   transcript,
@@ -590,7 +572,7 @@ func (c *Client) handleAudioMessage(message Message) {
 		}
 	} else {
 		// Fetch character data
-		character, charErr := c.Hub.characterService.GetCharacter(c.CharID)
+		character, charErr := c.Hub.characterService.GetCharacter(c.CharID, c.UserID)
 		if charErr != nil {
 			log.Printf("Error fetching character: %v", charErr)
 			c.sendErrorMessage("Failed to fetch character information")
@@ -641,7 +623,7 @@ func (c *Client) handleAudioMessage(message Message) {
 	}
 
 	// Create the character's response message
-	characterMessage := ChatMessage{
+	characterMessage := ws.ChatMessage{
 		ID:        fmt.Sprintf("resp-%d", time.Now().UnixNano()),
 		Sender:    "character",
 		Content:   characterResponse,
@@ -727,7 +709,7 @@ func (c *Client) handleStartStreamMessage(message Message) {
 	}
 
 	// Get character info
-	_, err = c.Hub.characterService.GetCharacter(characterID)
+	_, err = c.Hub.characterService.GetCharacter(characterID, c.UserID)
 	if err != nil {
 		log.Printf("Error getting character for streaming: %v", err)
 		c.sendErrorMessage("Could not find character")
@@ -883,7 +865,6 @@ func (c *Client) WritePump() {
 			}
 		}
 	}
-	log.Printf("[WritePump] Loop exited for client %s", c.ID)
 }
 
 // Improve logging for WebSocket connections
@@ -940,7 +921,7 @@ func ServeWs(hub *Hub, c *gin.Context) {
 		CharID:    uint(charIDUint),
 		Hub:       hub,
 		SessionID: sessionID,
-		messages:  []ChatMessage{},
+		messages:  []ws.ChatMessage{},
 	}
 
 	// Load previous messages for this session if it exists

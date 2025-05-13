@@ -3,9 +3,9 @@ package di
 import (
 	"ai-agent-character-demo/backend/ai"
 	"ai-agent-character-demo/backend/internal/service"
-	"ai-agent-character-demo/backend/internal/ws"
 	"ai-agent-character-demo/backend/pkg/jwt"
 	"ai-agent-character-demo/backend/pkg/logger" // Aliased to avoid conflicts
+	"ai-agent-character-demo/backend/pkg/ws"
 	"context"
 	"fmt"
 	"time"
@@ -23,6 +23,7 @@ type Container struct {
 	MessageService          *service.MessageService
 	AudioService            *service.AudioService
 	AIBridge                *ai.AIBridge
+	AI_Layer2Client         *ai.AI_Layer2Client
 	AdapterService          *service.AdapterService
 	CharacterServiceAdapter *service.CharacterServiceAdapter
 	MessageServiceAdapter   *service.MessageServiceAdapter
@@ -76,6 +77,12 @@ func New(db *gorm.DB, config *Config) (*Container, error) {
 		return nil, fmt.Errorf("failed to create AI Bridge: %w", err)
 	}
 
+	// Initialize AI_Layer2Client
+	aiLayer2Client, err := ai.NewAI_Layer2Client()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create AI_Layer2Client: %w", err)
+	}
+
 	// Initialize adapter service
 	adapterService, err := service.NewAdapterService(audioService, characterService, userService)
 	if err != nil {
@@ -85,20 +92,40 @@ func New(db *gorm.DB, config *Config) (*Container, error) {
 	// Initialize service adapters
 	characterServiceAdapter := service.NewCharacterServiceAdapter(characterService)
 	messageServiceAdapter := service.NewMessageServiceAdapter(messageService)
-	// Create AIServiceAdapter with function adapters
+	// Create AIServiceAdapter with function adapters (using AI_Layer2Client)
 	aiServiceAdapter := service.NewAIServiceAdapter(
-		// GenerateResponse adapter
+		// GenerateResponse adapter (calls LLM1 then LLM2)
 		func(character *ws.Character, userMessage string, history []ws.ChatMessage) (string, error) {
-			// Pass internal/ws types directly (no conversion needed)
-			return aiBridge.GenerateTextResponse(character, userMessage, history)
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			userID := ""
+			// Try to extract userID from character or history if available (MVP: leave blank if not)
+			// TODO: Pass userID from handler if available
+			contextResp, err := aiLayer2Client.GenerateContext(ctx, ai.ContextRequest{
+				CharacterID: character.ID,
+				UserID:      userID,
+				History:     history,
+			})
+			if err != nil {
+				return "", fmt.Errorf("context gen failed: %w", err)
+			}
+			resp, err := aiLayer2Client.GenerateResponse(ctx, ai.ResponseRequest{
+				CharacterID: character.ID,
+				UserID:      userID,
+				Context:     contextResp,
+				Message:     userMessage,
+				History:     history,
+			})
+			return resp, err
 		},
 		// TextToSpeech adapter
 		func(ctx context.Context, text string, voiceType string) ([]byte, error) {
-			return aiBridge.TextToSpeech(ctx, text, voiceType)
+			return aiLayer2Client.TextToSpeech(ctx, text, voiceType)
 		},
 		// SpeechToText adapter
 		func(ctx context.Context, sessionID string, audioData []byte) (string, string, error) {
-			return aiBridge.SpeechToText(ctx, sessionID, audioData)
+			transcript, err := aiLayer2Client.SpeechToText(ctx, sessionID, audioData)
+			return transcript, "", err
 		},
 	)
 
@@ -111,6 +138,7 @@ func New(db *gorm.DB, config *Config) (*Container, error) {
 		MessageService:          messageService,
 		AudioService:            audioService,
 		AIBridge:                aiBridge,
+		AI_Layer2Client:         aiLayer2Client,
 		AdapterService:          adapterService,
 		CharacterServiceAdapter: characterServiceAdapter,
 		MessageServiceAdapter:   messageServiceAdapter,

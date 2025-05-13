@@ -1,6 +1,7 @@
 package ai
 
 import (
+	"ai-agent-character-demo/backend/pkg/ws"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -53,7 +54,7 @@ func NewAIService() (*AIService, error) {
 }
 
 // GenerateResponse generates an AI response based on character info and conversation history
-func (s *AIService) GenerateResponse(character *Character, userMessage string, conversationHistory []Message) (string, error) {
+func (s *AIService) GenerateResponse(character *ws.Character, userMessage string, conversationHistory []ws.ChatMessage) (string, error) {
 	if s.useLocalModelAPI {
 		return s.generateResponseLocal(character, userMessage, conversationHistory)
 	}
@@ -81,7 +82,7 @@ type openAIResponse struct {
 	} `json:"error,omitempty"`
 }
 
-func (s *AIService) generateResponseOpenAI(character *Character, userMessage string, conversationHistory []Message) (string, error) {
+func (s *AIService) generateResponseOpenAI(character *ws.Character, userMessage string, conversationHistory []ws.ChatMessage) (string, error) {
 	systemPrompt := fmt.Sprintf(
 		"You are %s. %s Your personality traits are: %s. Respond in character, being concise and engaging.",
 		character.Name,
@@ -160,7 +161,7 @@ func (s *AIService) generateResponseOpenAI(character *Character, userMessage str
 	return openAIResp.Choices[0].Message.Content, nil
 }
 
-func (s *AIService) generateResponseLocal(character *Character, userMessage string, conversationHistory []Message) (string, error) {
+func (s *AIService) generateResponseLocal(character *ws.Character, userMessage string, conversationHistory []ws.ChatMessage) (string, error) {
 	systemPrompt := fmt.Sprintf(
 		"You are %s. %s Your personality traits are: %s. Respond in character, being concise and engaging.",
 		character.Name,

@@ -3,11 +3,24 @@ package ai
 import "time"
 
 // Message represents a chat message
-type Message struct {
-	ID        string    `json:"id"`
-	Sender    string    `json:"sender"`
-	Content   string    `json:"content"`
-	Timestamp time.Time `json:"timestamp"`
+// (If you want to use ChatMessage, import from ws or define here)
+// ChatMessage is now defined in ai_service.go for local use
+
+type STTRequest struct {
+	AudioData string `json:"audio_data"`
+}
+
+type STTResponse struct {
+	Transcript string `json:"transcript"`
+}
+
+type TTSRequest struct {
+	Text      string `json:"text"`
+	VoiceName string `json:"voice_name"`
+}
+
+type TTSResponse struct {
+	AudioData string `json:"audioData"`
 }
 
 // Character represents a character in the system

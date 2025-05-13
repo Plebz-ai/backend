@@ -11,7 +11,7 @@ import (
 	"os"
 	"time"
 
-	"ai-agent-character-demo/backend/internal/ws"
+	"ai-agent-character-demo/backend/pkg/ws"
 )
 
 // AIBridge is a simple HTTP client to the external AI service
@@ -69,16 +69,6 @@ func (b *AIBridge) GenerateTextResponse(
 	return respData.Text, nil
 }
 
-// STTRequest is the payload for speech-to-text
-type STTRequest struct {
-	AudioData string `json:"audio_data"`
-}
-
-// STTResponse is the transcript from the AI service
-type STTResponse struct {
-	Transcript string `json:"transcript"`
-}
-
 // SpeechToText sends audio bytes to the AI service and returns the transcript
 func (b *AIBridge) SpeechToText(ctx context.Context, sessionID string, audioData []byte) (string, string, error) {
 	reqBody := STTRequest{
@@ -97,17 +87,6 @@ func (b *AIBridge) SpeechToText(ctx context.Context, sessionID string, audioData
 	}
 	// transcript in first return; second string unused
 	return respData.Transcript, "", nil
-}
-
-// TTSRequest is the payload for text-to-speech
-type TTSRequest struct {
-	Text      string `json:"text"`
-	VoiceName string `json:"voice_name"`
-}
-
-// TTSResponse is the base64-encoded audio from the AI service
-type TTSResponse struct {
-	AudioData string `json:"audioData"`
 }
 
 // TextToSpeech sends text to the AI service and returns raw audio bytes
