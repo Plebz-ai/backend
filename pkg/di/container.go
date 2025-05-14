@@ -99,12 +99,19 @@ func New(db *gorm.DB, config *Config) (*Container, error) {
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
 			userID := ""
-			// Try to extract userID from character or history if available (MVP: leave blank if not)
-			// TODO: Pass userID from handler if available
+			// Build character details map for LLM1
+			characterDetails := map[string]interface{}{
+				"id":          character.ID,
+				"name":        character.Name,
+				"description": character.Description,
+				"personality": character.Personality,
+				"voice_type":  character.VoiceType,
+			}
+			// TODO: Pass session ID if available
 			contextResp, err := aiLayer2Client.GenerateContext(ctx, ai.ContextRequest{
-				CharacterID: character.ID,
-				UserID:      userID,
-				History:     history,
+				UserInput:        userMessage,
+				CharacterDetails: characterDetails,
+				SessionID:        "", // Pass session ID if you have it
 			})
 			if err != nil {
 				return "", fmt.Errorf("context gen failed: %w", err)
@@ -112,7 +119,7 @@ func New(db *gorm.DB, config *Config) (*Container, error) {
 			resp, err := aiLayer2Client.GenerateResponse(ctx, ai.ResponseRequest{
 				CharacterID: character.ID,
 				UserID:      userID,
-				Context:     contextResp,
+				Context:     contextResp.Context,
 				Message:     userMessage,
 				History:     history,
 			})

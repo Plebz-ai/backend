@@ -192,7 +192,7 @@ func corsMiddleware() gin.HandlerFunc {
 		}
 
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept, Accept-Encoding, X-CSRF-Token, Authorization, Origin, Upgrade, Connection")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept, Accept-Encoding, X-CSRF-Token, Authorization, Origin, Upgrade, Connection, Cache-Control")
 		c.Writer.Header().Set("Access-Control-Expose-Headers", "Upgrade, Connection")
 		c.Writer.Header().Set("Access-Control-Max-Age", "86400")
 

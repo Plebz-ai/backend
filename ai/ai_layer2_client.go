@@ -3,15 +3,14 @@ package ai
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
-	"fmt"
-	"io"
+	"log"
 	"net/http"
 	"time"
 
 	"ai-agent-character-demo/backend/pkg/config"
 	"ai-agent-character-demo/backend/pkg/ws"
+	"errors"
 )
 
 // AI_Layer2Client is a client for the AI_Layer2 microservice
@@ -40,36 +39,51 @@ func NewAI_Layer2Client() (*AI_Layer2Client, error) {
 
 // GenerateContext calls LLM1 to generate persona context (cached per session)
 type ContextRequest struct {
-	CharacterID uint             `json:"character_id"`
-	UserID      string           `json:"user_id"`
-	History     []ws.ChatMessage `json:"history"`
+	UserInput        string                 `json:"user_input"`
+	CharacterDetails map[string]interface{} `json:"character_details"`
+	SessionID        string                 `json:"session_id,omitempty"`
 }
 type ContextResponse struct {
-	Context string `json:"context"`
+	Context string                 `json:"context"`
+	Rules   map[string]interface{} `json:"rules"`
 }
 
-func (c *AI_Layer2Client) GenerateContext(ctx context.Context, req ContextRequest) (string, error) {
-	data, _ := json.Marshal(req)
-	endpoint := fmt.Sprintf("%s/llm1/context", c.baseURL)
-	request, _ := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer(data))
-	request.Header.Set("Content-Type", "application/json")
-	if c.apiKey != "" {
-		request.Header.Set("Authorization", "Bearer "+c.apiKey)
+func (c *AI_Layer2Client) GenerateContext(ctx context.Context, req ContextRequest) (ContextResponse, error) {
+	log.Printf("[AI_Layer2Client] Sending LLM1 request: %+v", req)
+	if req.UserInput == "" || req.CharacterDetails == nil {
+		return ContextResponse{}, errors.New("missing user_input or character_details")
 	}
-	resp, err := c.client.Do(request)
+	jsonData, err := json.Marshal(req)
 	if err != nil {
-		return "", err
+		log.Printf("[AI_Layer2Client] Error marshaling LLM1 request: %v", err)
+		return ContextResponse{}, err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("context gen failed: %s", resp.Status)
+	url := c.baseURL + "/llm1/generate-context"
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		log.Printf("[AI_Layer2Client] Error creating LLM1 request: %v", err)
+		return ContextResponse{}, err
 	}
-	var respData ContextResponse
-	body, _ := io.ReadAll(resp.Body)
-	if err := json.Unmarshal(body, &respData); err != nil {
-		return "", err
+	httpReq.Header.Set("Content-Type", "application/json")
+	if c.apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
-	return respData.Context, nil
+	httpResp, err := c.client.Do(httpReq)
+	if err != nil {
+		log.Printf("[AI_Layer2Client] LLM1 request failed: %v", err)
+		return ContextResponse{}, err
+	}
+	defer httpResp.Body.Close()
+	var llm1Resp ContextResponse
+	if err := json.NewDecoder(httpResp.Body).Decode(&llm1Resp); err != nil {
+		log.Printf("[AI_Layer2Client] Error decoding LLM1 response: %v", err)
+		return ContextResponse{}, err
+	}
+	if llm1Resp.Context == "fallback-context" {
+		return llm1Resp, errors.New("LLM1 failed to generate context")
+	}
+	log.Printf("[AI_Layer2Client] LLM1 response: %+v", llm1Resp)
+	return llm1Resp, nil
 }
 
 // GenerateResponse calls LLM2 to generate persona response
@@ -80,82 +94,56 @@ type ResponseRequest struct {
 	Message     string           `json:"message"`
 	History     []ws.ChatMessage `json:"history"`
 }
-type ResponseResponse struct {
-	Text string `json:"text"`
-}
 
 func (c *AI_Layer2Client) GenerateResponse(ctx context.Context, req ResponseRequest) (string, error) {
-	data, _ := json.Marshal(req)
-	endpoint := fmt.Sprintf("%s/llm2/response", c.baseURL)
-	request, _ := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer(data))
-	request.Header.Set("Content-Type", "application/json")
-	if c.apiKey != "" {
-		request.Header.Set("Authorization", "Bearer "+c.apiKey)
+	log.Printf("[AI_Layer2Client] Sending LLM2 request: %+v", req)
+	if req.Context == "" || req.Message == "" {
+		return "", errors.New("missing context or message")
 	}
-	resp, err := c.client.Do(request)
+	jsonData, err := json.Marshal(req)
 	if err != nil {
+		log.Printf("[AI_Layer2Client] Error marshaling LLM2 request: %v", err)
 		return "", err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("response gen failed: %s", resp.Status)
-	}
-	var respData ResponseResponse
-	body, _ := io.ReadAll(resp.Body)
-	if err := json.Unmarshal(body, &respData); err != nil {
+	url := c.baseURL + "/llm2/generate-response"
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		log.Printf("[AI_Layer2Client] Error creating LLM2 request: %v", err)
 		return "", err
 	}
-	return respData.Text, nil
+	httpReq.Header.Set("Content-Type", "application/json")
+	if c.apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
+	httpResp, err := c.client.Do(httpReq)
+	if err != nil {
+		log.Printf("[AI_Layer2Client] LLM2 request failed: %v", err)
+		return "", err
+	}
+	defer httpResp.Body.Close()
+	var llm2Resp struct {
+		Response string `json:"response"`
+		Error    string `json:"error,omitempty"`
+	}
+	if err := json.NewDecoder(httpResp.Body).Decode(&llm2Resp); err != nil {
+		log.Printf("[AI_Layer2Client] Error decoding LLM2 response: %v", err)
+		return "", err
+	}
+	if llm2Resp.Error != "" {
+		return llm2Resp.Response, errors.New(llm2Resp.Error)
+	}
+	log.Printf("[AI_Layer2Client] LLM2 response: %+v", llm2Resp)
+	return llm2Resp.Response, nil
 }
 
-// SpeechToText calls STT endpoint
-func (c *AI_Layer2Client) SpeechToText(ctx context.Context, sessionID string, audioData []byte) (string, error) {
-	reqBody := STTRequest{AudioData: base64.StdEncoding.EncodeToString(audioData)}
-	data, _ := json.Marshal(reqBody)
-	endpoint := fmt.Sprintf("%s/stt", c.baseURL)
-	request, _ := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer(data))
-	request.Header.Set("Content-Type", "application/json")
-	if c.apiKey != "" {
-		request.Header.Set("Authorization", "Bearer "+c.apiKey)
-	}
-	resp, err := c.client.Do(request)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("stt failed: %s", resp.Status)
-	}
-	var respData STTResponse
-	body, _ := io.ReadAll(resp.Body)
-	if err := json.Unmarshal(body, &respData); err != nil {
-		return "", err
-	}
-	return respData.Transcript, nil
-}
-
-// TextToSpeech calls TTS endpoint
+// Stub for TextToSpeech
 func (c *AI_Layer2Client) TextToSpeech(ctx context.Context, text string, voiceType string) ([]byte, error) {
-	reqBody := TTSRequest{Text: text, VoiceName: voiceType}
-	data, _ := json.Marshal(reqBody)
-	endpoint := fmt.Sprintf("%s/tts", c.baseURL)
-	request, _ := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer(data))
-	request.Header.Set("Content-Type", "application/json")
-	if c.apiKey != "" {
-		request.Header.Set("Authorization", "Bearer "+c.apiKey)
-	}
-	resp, err := c.client.Do(request)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("tts failed: %s", resp.Status)
-	}
-	var respData TTSResponse
-	body, _ := io.ReadAll(resp.Body)
-	if err := json.Unmarshal(body, &respData); err != nil {
-		return nil, err
-	}
-	return base64.StdEncoding.DecodeString(respData.AudioData)
+	log.Printf("[AI_Layer2Client] TextToSpeech called with text: %s, voiceType: %s", text, voiceType)
+	return nil, errors.New("TextToSpeech not implemented")
+}
+
+// Stub for SpeechToText
+func (c *AI_Layer2Client) SpeechToText(ctx context.Context, sessionID string, audioData []byte) (string, error) {
+	log.Printf("[AI_Layer2Client] SpeechToText called with sessionID: %s, audioData length: %d", sessionID, len(audioData))
+	return "", errors.New("SpeechToText not implemented")
 }
