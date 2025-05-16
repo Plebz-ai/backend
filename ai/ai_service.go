@@ -1,6 +1,7 @@
 package ai
 
 import (
+	"ai-agent-character-demo/backend/pkg/ws"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -13,25 +14,6 @@ import (
 	"os"
 	"time"
 )
-
-// Message represents a chat message
-type Message struct {
-	ID        string    `json:"id"`
-	Sender    string    `json:"sender"`
-	Content   string    `json:"content"`
-	Timestamp time.Time `json:"timestamp"`
-}
-
-// Character represents a character in the system
-type Character struct {
-	ID          uint      `json:"id"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	Personality string    `json:"personality"`
-	VoiceType   string    `json:"voice_type"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
-}
 
 // AIService handles AI-related operations including text generation,
 // text-to-speech, and speech-to-text conversions
@@ -72,7 +54,7 @@ func NewAIService() (*AIService, error) {
 }
 
 // GenerateResponse generates an AI response based on character info and conversation history
-func (s *AIService) GenerateResponse(character *Character, userMessage string, conversationHistory []Message) (string, error) {
+func (s *AIService) GenerateResponse(character *ws.Character, userMessage string, conversationHistory []ws.ChatMessage) (string, error) {
 	if s.useLocalModelAPI {
 		return s.generateResponseLocal(character, userMessage, conversationHistory)
 	}
@@ -100,7 +82,7 @@ type openAIResponse struct {
 	} `json:"error,omitempty"`
 }
 
-func (s *AIService) generateResponseOpenAI(character *Character, userMessage string, conversationHistory []Message) (string, error) {
+func (s *AIService) generateResponseOpenAI(character *ws.Character, userMessage string, conversationHistory []ws.ChatMessage) (string, error) {
 	systemPrompt := fmt.Sprintf(
 		"You are %s. %s Your personality traits are: %s. Respond in character, being concise and engaging.",
 		character.Name,
@@ -179,7 +161,7 @@ func (s *AIService) generateResponseOpenAI(character *Character, userMessage str
 	return openAIResp.Choices[0].Message.Content, nil
 }
 
-func (s *AIService) generateResponseLocal(character *Character, userMessage string, conversationHistory []Message) (string, error) {
+func (s *AIService) generateResponseLocal(character *ws.Character, userMessage string, conversationHistory []ws.ChatMessage) (string, error) {
 	systemPrompt := fmt.Sprintf(
 		"You are %s. %s Your personality traits are: %s. Respond in character, being concise and engaging.",
 		character.Name,
@@ -341,14 +323,6 @@ func (s *AIService) fallbackTextToSpeech(_ context.Context, text string, voiceTy
 	// In a production app, implement an alternative TTS service here
 	// For now, we're returning an error but acknowledging the parameters
 	return nil, errors.New("text-to-speech unavailable: ElevenLabs API key not configured")
-}
-
-// Helper function to get minimum value - used for text truncation
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 // SpeechToText converts audio to text

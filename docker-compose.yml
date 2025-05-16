@@ -1,85 +1,35 @@
 version: '3.8'
-
 services:
+  postgres:
+    image: postgres:15
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: character-demo
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
   backend:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: ai-character-demo-backend
-    ports:
-      - "8082:8081" 
-    environment:
-      - PORT=8081
-      - ENV=production
-      - DB_HOST=db
-      - DB_PORT=5432
-      - DB_NAME=ai_character_db
-      - DB_USER=postgres
-      - DB_PASSWORD=postgres
-      - USE_MOCK_AI=${USE_MOCK_AI:-false}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
-      - JWT_SECRET=${JWT_SECRET}
-      - AI_LAYER_URL=http://transcription_service:5000
-      - REDIS_URL=redis://redis:6380
     depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_started
-    volumes:
-      - ./audio_samples:/app/audio_samples
-    restart: unless-stopped
-    networks:
-      - ai-character-network
-      - ai-layer-network
-      - default
-      - shared-network
-    healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8081/api/health"]
-      interval: 30s
-      timeout: 3s
-      retries: 3
-      start_period: 10s
-
-  db:
-    image: postgres:15-alpine
-    container_name: ai-character-demo-db
-    ports:
-      - "5432:5432"
+      - postgres
     environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
-      - POSTGRES_DB=ai_character_db
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    restart: unless-stopped
-    networks:
-      - ai-character-network
-      - default
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  redis:
-    image: redis:latest
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: character-demo
+      DB_SSL_MODE: disable
+      JWT_SECRET: supersecretkey
+      PORT: 8081
     ports:
-      - "6380:6379"
-    networks:
-      - ai-character-network
-      - default
+      - "8081:8081"
+    command: ["/app/server"]
 
 volumes:
-  postgres_data:
-
-networks:
-  ai-character-network:
-    name: ai-character-network
-    external: true
-  ai-layer-network:
-    external: true
-  shared-network:
-    external: true
-  default:
+  pgdata:

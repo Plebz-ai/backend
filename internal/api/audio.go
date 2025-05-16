@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log"
@@ -62,6 +63,29 @@ func (c *AudioController) RegisterRoutes(router *gin.Engine) {
 	mlGroup.POST("/audio/chunks", c.StreamAudio)
 }
 
+// RegisterRoutesV1 registers versioned routes for the audio controller
+func (c *AudioController) RegisterRoutesV1(router *gin.RouterGroup) {
+	// User audio routes
+	audioGroup := router.Group("/audio")
+	audioGroup.Use(c.authMiddleware())
+	{
+		audioGroup.POST("/upload", c.validateUploadRequest(), c.UploadAudio)
+		audioGroup.GET("/:id", c.GetAudio)
+		audioGroup.GET("/session/:sessionId", c.GetSessionAudio)
+		audioGroup.POST("/stream", c.validateStreamRequest(), c.StreamAudio)
+	}
+
+	// ML API routes for audio processing
+	mlGroup := router.Group("/ml/audio")
+	mlGroup.Use(c.mlAuthMiddleware())
+	{
+		mlGroup.GET("/chunks", c.GetPendingChunks)
+		mlGroup.GET("/chunk/:id", c.GetAudioChunk)
+		mlGroup.PUT("/chunk/:id/status", c.validateStatusUpdate(), c.UpdateChunkStatus)
+		mlGroup.POST("/process", c.ProcessAudioData)
+	}
+}
+
 // authMiddleware ensures user authentication
 func (c *AudioController) authMiddleware() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
@@ -101,6 +125,148 @@ func (c *AudioController) mlAuthMiddleware() gin.HandlerFunc {
 		// Validate API key against environment variable
 		if apiKey != c.mlApiKey {
 			ctx.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid API key"})
+			return
+		}
+
+		ctx.Next()
+	}
+}
+
+// validateUploadRequest validates the audio upload request
+func (c *AudioController) validateUploadRequest() gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		// Validate required fields
+		if err := ctx.Request.ParseMultipartForm(10 << 20); err != nil {
+			ctx.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+				"error": fmt.Sprintf("Invalid form data: %v", err),
+				"code":  "INVALID_FORM",
+			})
+			return
+		}
+
+		// Check required fields
+		sessionID := ctx.PostForm("sessionId")
+		if sessionID == "" {
+			ctx.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+				"error": "Session ID is required",
+				"code":  "MISSING_SESSION_ID",
+			})
+			return
+		}
+
+		charIDStr := ctx.PostForm("charId")
+		if charIDStr == "" {
+			ctx.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+				"error": "Character ID is required",
+				"code":  "MISSING_CHARACTER_ID",
+			})
+			return
+		}
+
+		// Validate that charID is a valid number but we don't need to use it in this function
+		_, err := strconv.ParseUint(charIDStr, 10, 64)
+		if err != nil {
+			ctx.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+				"error": "Invalid character ID format",
+				"code":  "INVALID_CHARACTER_ID",
+			})
+			return
+		}
+
+		// Validate file
+		_, fileHeader, err := ctx.Request.FormFile("audioFile")
+		if err != nil {
+			ctx.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+				"error": fmt.Sprintf("Missing audio file: %v", err),
+				"code":  "MISSING_AUDIO_FILE",
+			})
+			return
+		}
+
+		// Validate file size (max 10MB)
+		if fileHeader.Size > 10<<20 {
+			ctx.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+				"error": "File size exceeds maximum limit of 10MB",
+				"code":  "FILE_TOO_LARGE",
+			})
+			return
+		}
+
+		// Validate audio format if provided
+		format := ctx.PostForm("format")
+		if format != "" {
+			validFormats := map[string]bool{
+				"webm": true,
+				"mp3":  true,
+				"wav":  true,
+				"ogg":  true,
+			}
+
+			if !validFormats[format] {
+				ctx.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+					"error": "Unsupported audio format. Supported formats: webm, mp3, wav, ogg",
+					"code":  "INVALID_FORMAT",
+				})
+				return
+			}
+		}
+
+		// All validations passed, continue
+		ctx.Next()
+	}
+}
+
+// validateStatusUpdate validates the status update request
+func (c *AudioController) validateStatusUpdate() gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		chunkID := ctx.Param("id")
+		if chunkID == "" {
+			ctx.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+				"error": "Chunk ID is required",
+				"code":  "MISSING_CHUNK_ID",
+			})
+			return
+		}
+
+		var statusUpdate struct {
+			Status string `json:"status" binding:"required,oneof=pending processing completed failed"`
+		}
+
+		if err := ctx.ShouldBindJSON(&statusUpdate); err != nil {
+			ctx.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+				"error": "Invalid request body. Status must be one of: pending, processing, completed, failed",
+				"code":  "INVALID_STATUS",
+			})
+			return
+		}
+
+		ctx.Next()
+	}
+}
+
+// validateStreamRequest validates the audio streaming request
+func (c *AudioController) validateStreamRequest() gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		var streamRequest struct {
+			SessionID string `json:"sessionId" binding:"required"`
+			Format    string `json:"format" binding:"omitempty,oneof=webm mp3 wav ogg"`
+			AudioData string `json:"audioData" binding:"required"`
+		}
+
+		if err := ctx.ShouldBindJSON(&streamRequest); err != nil {
+			ctx.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+				"error": fmt.Sprintf("Invalid request format: %v", err),
+				"code":  "INVALID_REQUEST",
+			})
+			return
+		}
+
+		// Verify audioData is valid base64
+		if _, err := base64.StdEncoding.DecodeString(streamRequest.AudioData); err != nil {
+			ctx.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+				"error": "Audio data must be Base64 encoded",
+				"code":  "INVALID_AUDIO_DATA",
+			})
 			return
 		}
 
@@ -532,4 +698,208 @@ func (c *AudioController) StreamAudio(ctx *gin.Context) {
 	// Implementation of the StreamAudio function
 	// This is a placeholder and should be implemented based on your specific requirements
 	ctx.JSON(http.StatusNotImplemented, gin.H{"error": "StreamAudio function not implemented"})
+}
+
+// GetAudio retrieves a specific audio file by ID
+func (c *AudioController) GetAudio(ctx *gin.Context) {
+	userId, exists := ctx.Get("userId")
+	if !exists {
+		ctx.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in token"})
+		return
+	}
+
+	audioID := ctx.Param("id")
+	if audioID == "" {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Audio ID is required"})
+		return
+	}
+
+	// This is essentially an alias for GetAudioChunk with a simpler URL pattern
+	chunk, err := c.audioService.GetAudioChunk(audioID)
+	if err != nil {
+		ctx.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("Error retrieving audio: %v", err)})
+		return
+	}
+
+	// Ensure user has access to this audio
+	if chunk.UserID != fmt.Sprintf("%d", userId.(uint)) {
+		ctx.JSON(http.StatusForbidden, gin.H{"error": "You don't have permission to access this audio"})
+		return
+	}
+
+	// Return audio data
+	ctx.Header("Content-Type", "audio/"+chunk.Format)
+	ctx.Header("Content-Disposition", fmt.Sprintf("attachment; filename=audio-%s.%s", audioID, chunk.Format))
+	ctx.Data(http.StatusOK, "audio/"+chunk.Format, chunk.AudioData)
+}
+
+// GetSessionAudio retrieves all audio for a session
+func (c *AudioController) GetSessionAudio(ctx *gin.Context) {
+	userId, exists := ctx.Get("userId")
+	if !exists {
+		ctx.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in token"})
+		return
+	}
+
+	sessionID := ctx.Param("sessionId")
+	if sessionID == "" {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Session ID is required"})
+		return
+	}
+
+	// This is essentially an alias for GetSessionAudioChunks with a simpler URL pattern
+	chunks, err := c.audioService.GetSessionAudioChunks(sessionID)
+	if err != nil {
+		ctx.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Error retrieving session audio: %v", err)})
+		return
+	}
+
+	// Filter chunks by user ID for security
+	userChunks := make([]map[string]interface{}, 0)
+	for _, chunk := range chunks {
+		if chunk.UserID == fmt.Sprintf("%d", userId.(uint)) {
+			userChunks = append(userChunks, map[string]interface{}{
+				"id":               chunk.ID,
+				"format":           chunk.Format,
+				"duration":         chunk.Duration,
+				"sampleRate":       chunk.SampleRate,
+				"channels":         chunk.Channels,
+				"createdAt":        chunk.CreatedAt,
+				"expiresAt":        chunk.ExpiresAt,
+				"processingStatus": chunk.ProcessingStatus,
+				"size":             len(chunk.AudioData),
+			})
+		}
+	}
+
+	ctx.JSON(http.StatusOK, gin.H{
+		"sessionId": sessionID,
+		"chunks":    userChunks,
+		"count":     len(userChunks),
+	})
+}
+
+// GetPendingChunks retrieves audio chunks that are pending processing
+func (c *AudioController) GetPendingChunks(ctx *gin.Context) {
+	// Parse pagination parameters
+	limitStr := ctx.DefaultQuery("limit", "10")
+	offsetStr := ctx.DefaultQuery("offset", "0")
+
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil || limit < 1 {
+		limit = 10
+	}
+
+	offset, err := strconv.Atoi(offsetStr)
+	if err != nil || offset < 0 {
+		offset = 0
+	}
+
+	// Get chunks from service
+	chunks, total, err := c.audioService.GetPendingAudioChunks(limit, offset)
+	if err != nil {
+		ctx.JSON(http.StatusInternalServerError, gin.H{
+			"error": fmt.Sprintf("Error retrieving pending chunks: %v", err),
+		})
+		return
+	}
+
+	// Convert to response format
+	response := make([]map[string]interface{}, 0, len(chunks))
+	for _, chunk := range chunks {
+		// Skip audio data in listing to reduce payload size
+		response = append(response, map[string]interface{}{
+			"id":               chunk.ID,
+			"userId":           chunk.UserID,
+			"sessionId":        chunk.SessionID,
+			"charId":           chunk.CharID,
+			"format":           chunk.Format,
+			"duration":         chunk.Duration,
+			"sampleRate":       chunk.SampleRate,
+			"channels":         chunk.Channels,
+			"createdAt":        chunk.CreatedAt,
+			"expiresAt":        chunk.ExpiresAt,
+			"metadata":         chunk.Metadata,
+			"processingStatus": chunk.ProcessingStatus,
+			"size":             len(chunk.AudioData),
+		})
+	}
+
+	ctx.JSON(http.StatusOK, gin.H{
+		"chunks": response,
+		"count":  len(response),
+		"total":  total,
+		"offset": offset,
+		"limit":  limit,
+	})
+}
+
+// UpdateChunkStatus updates the status of an audio chunk
+func (c *AudioController) UpdateChunkStatus(ctx *gin.Context) {
+	chunkID := ctx.Param("id")
+	if chunkID == "" {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Chunk ID is required"})
+		return
+	}
+
+	var statusUpdate struct {
+		Status string `json:"status" binding:"required"`
+	}
+
+	if err := ctx.ShouldBindJSON(&statusUpdate); err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	if err := c.audioService.UpdateProcessingStatus(chunkID, statusUpdate.Status); err != nil {
+		ctx.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Error updating status: %v", err)})
+		return
+	}
+
+	ctx.JSON(http.StatusOK, gin.H{"message": "Status updated successfully"})
+}
+
+// ProcessAudioData handles audio processing requests
+func (c *AudioController) ProcessAudioData(ctx *gin.Context) {
+	var request struct {
+		ChunkID string `json:"chunkId" binding:"required"`
+		Action  string `json:"action" binding:"required,oneof=transcribe analyze enhance"`
+	}
+
+	if err := ctx.ShouldBindJSON(&request); err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{
+			"error": fmt.Sprintf("Invalid request format: %v", err),
+		})
+		return
+	}
+
+	// Get the audio chunk
+	chunk, err := c.audioService.GetAudioChunk(request.ChunkID)
+	if err != nil {
+		ctx.JSON(http.StatusNotFound, gin.H{
+			"error": fmt.Sprintf("Error retrieving audio chunk: %v", err),
+		})
+		return
+	}
+
+	// Update status to processing
+	err = c.audioService.UpdateProcessingStatus(request.ChunkID, "processing")
+	if err != nil {
+		ctx.JSON(http.StatusInternalServerError, gin.H{
+			"error": fmt.Sprintf("Error updating processing status: %v", err),
+		})
+		return
+	}
+
+	// This would typically involve sending to an actual ML service
+	// For now, just simulate processing with a successful result
+	ctx.JSON(http.StatusAccepted, gin.H{
+		"message":                 fmt.Sprintf("Processing request for chunk %s accepted", request.ChunkID),
+		"chunkId":                 request.ChunkID,
+		"action":                  request.Action,
+		"format":                  chunk.Format,
+		"duration":                chunk.Duration,
+		"sampleRate":              chunk.SampleRate,
+		"estimatedProcessingTime": "5s",
+	})
 }

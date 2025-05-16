@@ -17,6 +17,9 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// NOTE: The context key for user ID is always 'userId' (lowercase 'd'), matching the auth middleware.
+// Do not use 'userID' (uppercase 'D').
+
 type CharacterHandler struct {
 	service *service.CharacterService
 }
@@ -46,6 +49,13 @@ func (h *CharacterHandler) CreateCharacter(c *gin.Context) {
 		req.Description = c.PostForm("description")
 		req.Personality = c.PostForm("personality")
 		req.VoiceType = c.PostForm("voice_type")
+		// Read is_custom from form (if present)
+		isCustomStr := c.PostForm("is_custom")
+		if isCustomStr == "true" || isCustomStr == "1" {
+			req.IsCustom = true
+		} else {
+			req.IsCustom = false
+		}
 
 		// First try to process base64 encoded avatar if available
 		base64Image := c.PostForm("avatar_base64")
@@ -134,6 +144,8 @@ func (h *CharacterHandler) CreateCharacter(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+		// Ensure IsCustom is set to true for all custom character creation
+		req.IsCustom = true
 	}
 
 	// Validate required fields
@@ -172,7 +184,7 @@ func (h *CharacterHandler) GetCharacter(c *gin.Context) {
 
 func (h *CharacterHandler) ListCharacters(c *gin.Context) {
 	// Get user ID from the JWT token context
-	userIdInterface, exists := c.Get("userID")
+	userIdInterface, exists := c.Get("userId")
 	if !exists {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
 		return
@@ -190,6 +202,10 @@ func (h *CharacterHandler) ListCharacters(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+
+	if characters == nil {
+		characters = []models.Character{}
 	}
 
 	c.JSON(http.StatusOK, characters)

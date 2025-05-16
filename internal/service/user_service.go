@@ -1,7 +1,9 @@
 package service
 
 import (
+	"encoding/json"
 	"errors"
+	"time"
 
 	"ai-agent-character-demo/backend/internal/models"
 	"ai-agent-character-demo/backend/pkg/jwt"
@@ -13,16 +15,21 @@ var (
 	ErrUserAlreadyExists  = errors.New("user with this email already exists")
 	ErrInvalidCredentials = errors.New("invalid email or password")
 	ErrUserNotFound       = errors.New("user not found")
+	ErrInvalidRole        = errors.New("invalid role")
 )
 
 // UserService handles user-related operations
 type UserService struct {
-	db *gorm.DB
+	db         *gorm.DB
+	jwtService *jwt.Service
 }
 
 // NewUserService creates a new user service
-func NewUserService(db *gorm.DB) *UserService {
-	return &UserService{db: db}
+func NewUserService(db *gorm.DB, jwtService *jwt.Service) *UserService {
+	return &UserService{
+		db:         db,
+		jwtService: jwtService,
+	}
 }
 
 // CreateUser creates a new user
@@ -34,11 +41,25 @@ func (s *UserService) CreateUser(req *models.CreateUserRequest) (*models.User, s
 		return nil, "", ErrUserAlreadyExists
 	}
 
+	// Validate and normalize role (default to user if not specified or invalid)
+	role := jwt.Role(req.Role)
+	if role == "" {
+		role = jwt.RoleUser
+	} else if role != jwt.RoleUser && role != jwt.RoleAdmin && role != jwt.RoleGuest {
+		return nil, "", ErrInvalidRole
+	}
+
+	// Get default permissions for this role
+	permissions := jwt.GetRolePermissions(role)
+	permissionsJSON, _ := json.Marshal(permissions)
+
 	// Create new user
 	user := models.User{
-		Name:     req.Name,
-		Email:    req.Email,
-		Password: req.Password,
+		Name:        req.Name,
+		Email:       req.Email,
+		Password:    req.Password,
+		Role:        string(role),
+		Permissions: string(permissionsJSON),
 	}
 
 	// Save user to database
@@ -47,7 +68,7 @@ func (s *UserService) CreateUser(req *models.CreateUserRequest) (*models.User, s
 	}
 
 	// Generate JWT token
-	token, err := jwt.GenerateToken(user.ID, user.Email)
+	token, err := s.jwtService.GenerateToken(user.ID, user.Email, role, permissions)
 	if err != nil {
 		return nil, "", err
 	}
@@ -72,8 +93,21 @@ func (s *UserService) Login(req *models.LoginRequest) (*models.User, string, err
 		return nil, "", ErrInvalidCredentials
 	}
 
-	// Generate JWT token
-	token, err := jwt.GenerateToken(user.ID, user.Email)
+	// Update last login time
+	s.db.Model(&user).Update("last_login", time.Now())
+
+	// Generate JWT token with role
+	role := jwt.Role(user.Role)
+
+	// Get permissions for this role
+	var permissions []jwt.Permission
+	if user.Permissions != "" {
+		_ = json.Unmarshal([]byte(user.Permissions), &permissions)
+	} else {
+		permissions = jwt.GetRolePermissions(role)
+	}
+
+	token, err := s.jwtService.GenerateToken(user.ID, user.Email, role, permissions)
 	if err != nil {
 		return nil, "", err
 	}
@@ -105,4 +139,34 @@ func (s *UserService) GetUserByEmail(email string) (*models.User, error) {
 		return nil, result.Error
 	}
 	return &user, nil
+}
+
+// UpdateUserRole updates a user's role and permissions
+func (s *UserService) UpdateUserRole(userID uint, role jwt.Role) error {
+	// Validate role
+	if role != jwt.RoleUser && role != jwt.RoleAdmin && role != jwt.RoleGuest {
+		return ErrInvalidRole
+	}
+
+	// Get default permissions for this role
+	permissions := jwt.GetRolePermissions(role)
+	permissionsJSON, _ := json.Marshal(permissions)
+
+	// Update user
+	result := s.db.Model(&models.User{}).
+		Where("id = ?", userID).
+		Updates(map[string]interface{}{
+			"role":        string(role),
+			"permissions": string(permissionsJSON),
+		})
+
+	if result.Error != nil {
+		return result.Error
+	}
+
+	if result.RowsAffected == 0 {
+		return ErrUserNotFound
+	}
+
+	return nil
 }

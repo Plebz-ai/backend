@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"ai-agent-character-demo/backend/internal/models"
-	"ai-agent-character-demo/backend/internal/ws"
+	ws "ai-agent-character-demo/backend/pkg/ws"
 
 	"gorm.io/gorm"
 )
@@ -44,6 +44,7 @@ func (s *CharacterService) CreateCharacter(req *models.CreateCharacterRequest) (
 		AvatarURL:   req.AvatarURL,
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
+		IsCustom:    req.IsCustom,
 	}
 
 	result := s.db.Create(character)
@@ -54,12 +55,20 @@ func (s *CharacterService) CreateCharacter(req *models.CreateCharacterRequest) (
 	return character, nil
 }
 
+// Helper to determine if a character is custom
+func isCustomCharacter(c *models.Character) bool {
+	// TODO: Replace this logic with your actual custom character criteria
+	// For example, if you have a DB field or a naming convention
+	return c.IsCustom // or: strings.HasPrefix(c.Name, "Custom")
+}
+
 func (s *CharacterService) GetCharacter(id uint) (*models.Character, error) {
 	var character models.Character
 	result := s.db.First(&character, id)
 	if result.Error != nil {
 		return nil, result.Error
 	}
+	character.IsCustom = isCustomCharacter(&character)
 	return &character, nil
 }
 
@@ -76,9 +85,6 @@ func (s *CharacterService) GetWebSocketCharacter(id uint) (*ws.Character, error)
 		Description: character.Description,
 		Personality: character.Personality,
 		VoiceType:   character.VoiceType,
-		AvatarURL:   character.AvatarURL,
-		CreatedAt:   character.CreatedAt,
-		UpdatedAt:   character.UpdatedAt,
 	}, nil
 }
 
@@ -87,6 +93,12 @@ func (s *CharacterService) ListCharacters() ([]models.Character, error) {
 	result := s.db.Find(&characters)
 	if result.Error != nil {
 		return nil, result.Error
+	}
+	if characters == nil {
+		characters = []models.Character{}
+	}
+	for i := range characters {
+		characters[i].IsCustom = isCustomCharacter(&characters[i])
 	}
 	return characters, nil
 }
@@ -125,6 +137,11 @@ func (s *CharacterService) ListCharactersWithConversations(userID uint) ([]model
 	if result.Error != nil {
 		return nil, result.Error
 	}
-
+	if characters == nil {
+		characters = []models.Character{}
+	}
+	for i := range characters {
+		characters[i].IsCustom = isCustomCharacter(&characters[i])
+	}
 	return characters, nil
 }
