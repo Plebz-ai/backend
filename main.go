@@ -121,6 +121,7 @@ func main() {
 	messageService := service.NewMessageService(db)
 	messageHandler := api.NewMessageController(messageService, characterHandler, aiServiceAdapter, jwtService)
 	audioHandler := api.NewAudioController(audioService, jwtService)
+	userController := api.NewUserController(db)
 
 	// Set up /api legacy routes for frontend compatibility
 	apiLegacy := ginEngine.Group("/api")
@@ -209,6 +210,12 @@ func main() {
 		apiLegacy.POST("/setup", func(c *gin.Context) { c.JSON(501, gin.H{"error": "Not implemented (stub)"}) })
 		apiLegacy.GET("/implement", func(c *gin.Context) { c.JSON(501, gin.H{"error": "Not implemented (stub)"}) })
 		apiLegacy.POST("/implement", func(c *gin.Context) { c.JSON(501, gin.H{"error": "Not implemented (stub)"}) })
+
+		// User (protected)
+		userGroup := apiLegacy.Group("/user")
+		userGroup.Use(legacyJWT)
+		userGroup.GET("/preferences", userController.GetUserPreferences)
+		userGroup.POST("/preferences", userController.SetUserPreferences)
 	}
 
 	// Catch-all for unhandled /api/* routes
