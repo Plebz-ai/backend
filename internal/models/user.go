@@ -48,6 +48,17 @@ type UserResponse struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
+// UserPreference represents a user's personalization settings
+type UserPreference struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	UserID    uint      `gorm:"index" json:"userId"`
+	ChatStyle string    `json:"chatStyle"` // e.g. 'concise', 'detailed'
+	TTSVoice  string    `json:"ttsVoice"`  // e.g. 'male', 'female', 'predefined'
+	Theme     string    `json:"theme"`     // e.g. 'light', 'dark'
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
 // HashPassword hashes a password for storage
 func HashPassword(password string) (string, error) {
 	bytes, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
