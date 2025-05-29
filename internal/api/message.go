@@ -493,7 +493,6 @@ func (c *MessageController) GetMessages(ctx *gin.Context) {
 	}
 
 	sessionID, hasSession := ctx.Get("sessionId")
-	limit, _ := ctx.Get("limit")
 
 	// Add support for limit and offset query params
 	queryLimit := 30
