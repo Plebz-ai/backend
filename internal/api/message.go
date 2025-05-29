@@ -591,7 +591,6 @@ func (c *MessageController) GetMessagesForML(ctx *gin.Context) {
 	}
 
 	sessionID, hasSession := ctx.Get("sessionId")
-	limit, _ := ctx.Get("limit")
 
 	if hasSession {
 		sessionMessages, err := c.messageService.GetSessionMessages(charID.(uint), sessionID.(string))
@@ -621,7 +620,6 @@ func (c *MessageController) GetMessagesForML(ctx *gin.Context) {
 			"sessionId":   sessionID,
 			"messages":    formattedMessages,
 			"count":       len(formattedMessages),
-			"limit":       limit,
 		})
 	} else {
 		ctx.JSON(http.StatusNotImplemented, gin.H{
