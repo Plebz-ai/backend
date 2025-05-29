@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -157,6 +158,8 @@ func (c *MessageController) validateListMessagesRequest() gin.HandlerFunc {
 			ctx.Set("sessionId", sessionID)
 		}
 		ctx.Set("limit", limit)
+
+		log.Printf("[%s] Validated ListMessagesRequest: CharacterID=%d, SessionID=%s, Limit=%d", ctx.FullPath(), uint(charID), sessionID, limit)
 
 		ctx.Next()
 	}
@@ -488,34 +491,42 @@ func (c *MessageController) GetRecentMessages(ctx *gin.Context) {
 func (c *MessageController) GetMessages(ctx *gin.Context) {
 	charID, exists := ctx.Get("characterId")
 	if !exists {
+		log.Printf("[%s] GetMessages Error: Missing character ID in context", ctx.FullPath())
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Missing character ID"})
 		return
 	}
 
 	sessionID, hasSession := ctx.Get("sessionId")
+	queryLimit, limitExists := ctx.Get("limit")
+	queryOffset, offsetExists := ctx.Get("offset")
 
-	// Add support for limit and offset query params
-	queryLimit := 30
-	queryOffset := 0
-	if l := ctx.Query("limit"); l != "" {
-		if v, err := strconv.Atoi(l); err == nil && v > 0 {
-			queryLimit = v
-		}
+	charIDUint := charID.(uint)
+	var sessionIDStr string
+	if hasSession {
+		sessionIDStr = sessionID.(string)
 	}
-	if o := ctx.Query("offset"); o != "" {
-		if v, err := strconv.Atoi(o); err == nil && v >= 0 {
-			queryOffset = v
-		}
+
+	limitInt := 30 // Default
+	if limitExists {
+		limitInt = queryLimit.(int)
 	}
+	offsetInt := 0 // Default
+	if offsetExists {
+		offsetInt = queryOffset.(int)
+	}
+
+	log.Printf("[%s] GetMessages Handler: CharacterID=%d, SessionID=%s (Exists: %t), Limit=%d, Offset=%d", ctx.FullPath(), charIDUint, sessionIDStr, hasSession, limitInt, offsetInt)
 
 	if hasSession {
-		sessionMessages, totalCount, err := c.messageService.GetSessionMessagesPaginated(charID.(uint), sessionID.(string), queryLimit, queryOffset)
+		sessionMessages, totalCount, err := c.messageService.GetSessionMessagesPaginated(charID.(uint), sessionID.(string), queryLimit.(int), queryOffset.(int))
 		if err != nil {
+			log.Printf("[%s] GetMessages Error: Error retrieving session messages for CharacterID=%d, SessionID=%s, Limit=%d, Offset=%d - %v", ctx.FullPath(), charIDUint, sessionIDStr, limitInt, offsetInt, err)
 			ctx.JSON(http.StatusInternalServerError, gin.H{
 				"error": fmt.Sprintf("Error retrieving session messages: %v", err),
 			})
 			return
 		}
+		log.Printf("[%s] Successfully retrieved %d messages (Total: %d) for CharacterID=%d, SessionID=%s", ctx.FullPath(), len(sessionMessages), totalCount, charIDUint, sessionIDStr)
 		formattedMessages := make([]map[string]interface{}, len(sessionMessages))
 		for i, msg := range sessionMessages {
 			formattedMessages[i] = map[string]interface{}{
