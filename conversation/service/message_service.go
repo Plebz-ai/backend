@@ -26,3 +26,12 @@ func (s *MessageService) GetMessageByID(id uint) (*models.Message, error) {
 func (s *MessageService) GetMessagesBySession(sessionID string) ([]models.Message, error) {
 	return s.repo.GetBySession(sessionID)
 }
+
+func (s *MessageService) GetMessagesBySessionPaginated(sessionID string, limit, offset int) ([]models.Message, int, error) {
+	messages, err := s.repo.GetBySessionPaginated(sessionID, limit, offset)
+	total := 0
+	if err == nil {
+		total = len(messages)
+	}
+	return messages, total, err
+}

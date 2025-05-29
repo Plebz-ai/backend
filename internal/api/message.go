@@ -73,6 +73,7 @@ func (c *MessageController) RegisterRoutesV1(router *gin.RouterGroup) {
 		messageGroup.GET("", c.validateListMessagesRequest(), c.GetMessages)
 		messageGroup.GET("/session/:sessionId", c.validateSessionRequest(), c.GetSessionMessages)
 		messageGroup.POST("", c.validateCreateMessageRequest(), c.SaveMessage)
+		messageGroup.POST("/feedback", c.SaveFeedback)
 	}
 
 	// ML API endpoints (with separate authentication)
@@ -494,15 +495,28 @@ func (c *MessageController) GetMessages(ctx *gin.Context) {
 	sessionID, hasSession := ctx.Get("sessionId")
 	limit, _ := ctx.Get("limit")
 
+	// Add support for limit and offset query params
+	queryLimit := 30
+	queryOffset := 0
+	if l := ctx.Query("limit"); l != "" {
+		if v, err := strconv.Atoi(l); err == nil && v > 0 {
+			queryLimit = v
+		}
+	}
+	if o := ctx.Query("offset"); o != "" {
+		if v, err := strconv.Atoi(o); err == nil && v >= 0 {
+			queryOffset = v
+		}
+	}
+
 	if hasSession {
-		sessionMessages, err := c.messageService.GetSessionMessages(charID.(uint), sessionID.(string))
+		sessionMessages, totalCount, err := c.messageService.GetSessionMessagesPaginated(charID.(uint), sessionID.(string), queryLimit, queryOffset)
 		if err != nil {
 			ctx.JSON(http.StatusInternalServerError, gin.H{
 				"error": fmt.Sprintf("Error retrieving session messages: %v", err),
 			})
 			return
 		}
-
 		formattedMessages := make([]map[string]interface{}, len(sessionMessages))
 		for i, msg := range sessionMessages {
 			formattedMessages[i] = map[string]interface{}{
@@ -512,13 +526,13 @@ func (c *MessageController) GetMessages(ctx *gin.Context) {
 				"timestamp": msg.Timestamp,
 			}
 		}
-
 		ctx.JSON(http.StatusOK, gin.H{
 			"characterId": charID,
 			"sessionId":   sessionID,
 			"messages":    formattedMessages,
-			"count":       len(formattedMessages),
-			"limit":       limit,
+			"count":       totalCount,
+			"limit":       queryLimit,
+			"offset":      queryOffset,
 		})
 	} else {
 		ctx.JSON(http.StatusNotImplemented, gin.H{
@@ -678,4 +692,27 @@ func (c *MessageController) ProcessMessage(ctx *gin.Context) {
 		"characterId": req.CharacterID,
 		"sessionId":   req.SessionID,
 	})
+}
+
+// Feedback model
+type FeedbackRequest struct {
+	MessageID    string `json:"messageId" binding:"required"`
+	UserID       uint   `json:"userId" binding:"required"`
+	FeedbackType string `json:"feedbackType" binding:"required,oneof=up down flag"`
+	Timestamp    int64  `json:"timestamp"`
+}
+
+// SaveFeedback handler
+func (c *MessageController) SaveFeedback(ctx *gin.Context) {
+	var req FeedbackRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid feedback request"})
+		return
+	}
+	err := c.messageService.SaveFeedback(req.MessageID, req.UserID, req.FeedbackType, req.Timestamp)
+	if err != nil {
+		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	ctx.JSON(http.StatusCreated, gin.H{"status": "ok"})
 }
