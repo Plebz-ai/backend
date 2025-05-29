@@ -10,6 +10,7 @@ type MessageRepository interface {
 	Create(message *models.Message) error
 	GetByID(id uint) (*models.Message, error)
 	GetBySession(sessionID string) ([]models.Message, error)
+	GetBySessionPaginated(sessionID string, limit, offset int) ([]models.Message, error)
 }
 
 type GormMessageRepository struct {
@@ -36,5 +37,15 @@ func (r *GormMessageRepository) GetByID(id uint) (*models.Message, error) {
 func (r *GormMessageRepository) GetBySession(sessionID string) ([]models.Message, error) {
 	var messages []models.Message
 	err := r.db.Where("session_id = ?", sessionID).Find(&messages).Error
+	return messages, err
+}
+
+func (r *GormMessageRepository) GetBySessionPaginated(sessionID string, limit, offset int) ([]models.Message, error) {
+	var messages []models.Message
+	err := r.db.Where("session_id = ?", sessionID).
+		Order("timestamp ASC").
+		Limit(limit).
+		Offset(offset).
+		Find(&messages).Error
 	return messages, err
 }
