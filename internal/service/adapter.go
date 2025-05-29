@@ -114,6 +114,28 @@ func (s *MessageService) GetSessionMessages(characterID uint, sessionID string) 
 	return messages, result.Error
 }
 
+// Add paginated message fetching
+func (s *MessageService) GetSessionMessagesPaginated(characterID uint, sessionID string, limit, offset int) ([]models.Message, int, error) {
+	var messages []models.Message
+	var total int64
+	db := s.db.Model(&models.Message{}).Where("character_id = ? AND session_id = ?", characterID, sessionID)
+	db.Count(&total)
+	err := db.Order("timestamp ASC").Limit(limit).Offset(offset).Find(&messages).Error
+	return messages, int(total), err
+}
+
+// Add feedback saving
+func (s *MessageService) SaveFeedback(messageID string, userID uint, feedbackType string, timestamp int64) error {
+	feedback := &models.MessageFeedback{
+		MessageID:    messageID,
+		UserID:       userID,
+		FeedbackType: feedbackType,
+		Timestamp:    timestamp,
+		CreatedAt:    time.Now(),
+	}
+	return s.db.Create(feedback).Error
+}
+
 // MessageServiceAdapter adapts MessageService to be used with the WebSocket hub
 type MessageServiceAdapter struct {
 	messageService *MessageService
@@ -150,6 +172,29 @@ func (a *MessageServiceAdapter) GetSessionMessages(characterID uint, sessionID s
 	}
 
 	return wsMessages, nil
+}
+
+// Add paginated message fetching
+func (a *MessageServiceAdapter) GetSessionMessagesPaginated(characterID uint, sessionID string, limit, offset int) ([]ws.ChatMessage, int, error) {
+	dbMessages, total, err := a.messageService.GetSessionMessagesPaginated(characterID, sessionID, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	wsMessages := make([]ws.ChatMessage, len(dbMessages))
+	for i, msg := range dbMessages {
+		wsMessages[i] = ws.ChatMessage{
+			ID:        msg.ExternalID,
+			Sender:    msg.Sender,
+			Content:   msg.Content,
+			Timestamp: msg.Timestamp,
+		}
+	}
+	return wsMessages, total, nil
+}
+
+// Add feedback saving
+func (a *MessageServiceAdapter) SaveFeedback(messageID string, userID uint, feedbackType string, timestamp int64) error {
+	return a.messageService.SaveFeedback(messageID, userID, feedbackType, timestamp)
 }
 
 // AdapterService handles the connection between the audio service and AI layer
