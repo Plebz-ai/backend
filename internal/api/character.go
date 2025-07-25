@@ -1,8 +1,11 @@
 package api
 
 import (
+	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -29,6 +32,16 @@ func NewCharacterHandler(service *service.CharacterService) *CharacterHandler {
 }
 
 func (h *CharacterHandler) CreateCharacter(c *gin.Context) {
+	// Log incoming request for debugging
+	log.Printf("[CreateCharacter] Headers: %+v", c.Request.Header)
+	log.Printf("[CreateCharacter] Content-Type: %s", c.GetHeader("Content-Type"))
+	if c.Request.Body != nil {
+		bodyBytes, _ := io.ReadAll(c.Request.Body)
+		log.Printf("[CreateCharacter] Raw Body: %s", string(bodyBytes))
+		// Rewind body for further reading
+		c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+	}
+
 	// Check content type to determine if it's a multipart form
 	contentType := c.GetHeader("Content-Type")
 	isMultipart := strings.Contains(contentType, "multipart/form-data")
@@ -48,7 +61,40 @@ func (h *CharacterHandler) CreateCharacter(c *gin.Context) {
 		req.Name = c.PostForm("name")
 		req.Description = c.PostForm("description")
 		req.Personality = c.PostForm("personality")
+		req.Background = c.PostForm("background")
+		req.Category = c.PostForm("category")
 		req.VoiceType = c.PostForm("voice_type")
+		req.VoiceGender = c.PostForm("voice_gender")
+		req.VoiceStyle = c.PostForm("voice_style")
+		// Parse arrays from JSON strings
+		traitsStr := c.PostForm("traits")
+		if traitsStr != "" {
+			if err := json.Unmarshal([]byte(traitsStr), &req.Traits); err != nil {
+				log.Printf("Error parsing traits: %v", err)
+				req.Traits = []string{}
+			}
+		}
+		goalsStr := c.PostForm("goals")
+		if goalsStr != "" {
+			if err := json.Unmarshal([]byte(goalsStr), &req.Goals); err != nil {
+				log.Printf("Error parsing goals: %v", err)
+				req.Goals = []string{}
+			}
+		}
+		fearsStr := c.PostForm("fears")
+		if fearsStr != "" {
+			if err := json.Unmarshal([]byte(fearsStr), &req.Fears); err != nil {
+				log.Printf("Error parsing fears: %v", err)
+				req.Fears = []string{}
+			}
+		}
+		relationshipsStr := c.PostForm("relationships")
+		if relationshipsStr != "" {
+			if err := json.Unmarshal([]byte(relationshipsStr), &req.Relationships); err != nil {
+				log.Printf("Error parsing relationships: %v", err)
+				req.Relationships = []string{}
+			}
+		}
 		// Read is_custom from form (if present)
 		isCustomStr := c.PostForm("is_custom")
 		if isCustomStr == "true" || isCustomStr == "1" {
@@ -137,6 +183,8 @@ func (h *CharacterHandler) CreateCharacter(c *gin.Context) {
 				req.AvatarURL = fmt.Sprintf("%s://%s/uploads/%s", scheme, host, filename)
 			}
 		}
+		// Log the parsed request
+		log.Printf("[CreateCharacter] Parsed request: %+v", req)
 	} else {
 		// Handle JSON request
 		if err := c.ShouldBindJSON(&req); err != nil {
@@ -150,6 +198,7 @@ func (h *CharacterHandler) CreateCharacter(c *gin.Context) {
 
 	// Validate required fields
 	if req.Name == "" || req.Description == "" || req.Personality == "" || req.VoiceType == "" {
+		log.Printf("[CreateCharacter] Missing required fields: name=%s, description=%s, personality=%s, voice_type=%s", req.Name, req.Description, req.Personality, req.VoiceType)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "missing required fields"})
 		return
 	}
@@ -208,5 +257,17 @@ func (h *CharacterHandler) ListCharacters(c *gin.Context) {
 		characters = []models.Character{}
 	}
 
+	c.JSON(http.StatusOK, characters)
+}
+
+func (h *CharacterHandler) ListAllCharacters(c *gin.Context) {
+	characters, err := h.service.ListCharacters()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if characters == nil {
+		characters = []models.Character{}
+	}
 	c.JSON(http.StatusOK, characters)
 }

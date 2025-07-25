@@ -134,6 +134,7 @@ func (r *Router) SetupRoutes() {
 			characterRoutes.POST("", middleware.RequirePermission(jwt.PermWriteCharacter), characterHandler.CreateCharacter)
 			characterRoutes.GET("", middleware.RequirePermission(jwt.PermReadCharacter), characterHandler.ListCharacters)
 			characterRoutes.GET("/:id", middleware.RequirePermission(jwt.PermReadCharacter), characterHandler.GetCharacter)
+			characterRoutes.GET("/all", middleware.RequirePermission(jwt.PermReadCharacter), characterHandler.ListAllCharacters)
 
 			// Comment out these routes until the methods are implemented
 			// characterRoutes.PUT("/:id", middleware.RequirePermission(jwt.PermWriteCharacter), characterHandler.UpdateCharacter)
